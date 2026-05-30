@@ -1,0 +1,204 @@
+import { IAdapter, AdapterResponse } from './types.js';
+import { ProviderConfig } from '../config.js';
+import { logger } from '../utils/logger.js';
+import { execSync } from 'node:child_process';
+
+export class VertexGeminiAdapter implements IAdapter {
+  name: string;
+  type: 'vertex-gemini' = 'vertex-gemini';
+  private provider: ProviderConfig;
+
+  constructor(provider: ProviderConfig) {
+    this.name = provider.name;
+    this.provider = provider;
+  }
+
+  private resolveModelAndToken(payload: any, headers?: Record<string, string>) {
+    // 1. 提取 target model
+    let model = headers?.['x-target-model'] || headers?.['X-Target-Model'] || payload?._targetModel;
+    if (!model) {
+      if (payload?.model) {
+        model = payload.model;
+      } else {
+        model = this.provider.models[0] || 'gemini-2.5-pro';
+      }
+    }
+
+    // 2. 提取 Bearer Token
+    let token = headers?.['authorization'] || headers?.['Authorization'];
+    if (token && token.startsWith('Bearer ')) {
+      token = token.substring(7);
+    } else {
+      token = this.getBearerToken();
+    }
+
+    // 清洗临时字段
+    if (payload) {
+      delete payload._targetModel;
+    }
+
+    return { model, token };
+  }
+
+  private getBearerToken(): string {
+    if (this.provider.api_key && !this.provider.api_key.startsWith('$')) {
+      return this.provider.api_key;
+    }
+    if (process.env.VERTEX_BEARER_TOKEN) {
+      return process.env.VERTEX_BEARER_TOKEN;
+    }
+    if (process.env.GCP_ACCESS_TOKEN) {
+      return process.env.GCP_ACCESS_TOKEN;
+    }
+    if (process.env.VERTEX_API_KEY) {
+      return process.env.VERTEX_API_KEY;
+    }
+
+    // 智能开发者回退：尝试通过 gcloud cli 获取
+    try {
+      const gcloudToken = execSync('gcloud auth print-access-token', {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 2000
+      }).toString().trim();
+      if (gcloudToken) {
+        logger.info('[VERTEX_ADAPTER] 成功通过 gcloud cli 自动获取 Google Cloud Access Token');
+        return gcloudToken;
+      }
+    } catch (e) {
+      // 忽略，说明 gcloud cli 不可用或未登录
+    }
+
+    return '';
+  }
+
+  /**
+   * 执行非流式调用
+   */
+  async execute(
+    payload: any,
+    headers?: Record<string, string>
+  ): Promise<AdapterResponse> {
+    const requestId = headers?.['x-request-id'] || 'unknown';
+    const { model, token } = this.resolveModelAndToken(payload, headers);
+
+    let baseUrl = this.provider.api_base_url;
+    if (!baseUrl.endsWith('/')) {
+      baseUrl += '/';
+    }
+
+    // Vertex AI URL 格式: https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent
+    const url = `${baseUrl}${model}:generateContent`;
+    logger.debug(`[VERTEX_ADAPTER] 发起非流式请求. URL: ${baseUrl}${model}:generateContent`, requestId);
+
+    const reqHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) {
+      reqHeaders['Authorization'] = `Bearer ${token}`;
+    }
+
+    if (headers) {
+      for (const [k, v] of Object.entries(headers)) {
+        const lowerK = k.toLowerCase();
+        if (!['host', 'content-length', 'content-type', 'connection', 'x-api-key', 'x-target-model', 'authorization'].includes(lowerK)) {
+          reqHeaders[k] = v;
+        }
+      }
+    }
+
+    const startTime = Date.now();
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: reqHeaders,
+        body: JSON.stringify(payload)
+      });
+
+      const responseHeaders: Record<string, string> = {};
+      response.headers.forEach((v, k) => {
+        responseHeaders[k] = v;
+      });
+
+      let responseBody: any;
+      const text = await response.text();
+      try {
+        responseBody = text ? JSON.parse(text) : {};
+      } catch (e) {
+        responseBody = { error: { message: text } };
+      }
+
+      logger.info(`[VERTEX_ADAPTER] 非流式响应. Code: ${response.status}. 耗时: ${Date.now() - startTime}ms`, requestId);
+
+      return {
+        status: response.status,
+        headers: responseHeaders,
+        body: responseBody
+      };
+    } catch (err: any) {
+      logger.error(`[VERTEX_ADAPTER] 请求异常. 错误: ${err.message}`, requestId);
+      throw err;
+    }
+  }
+
+  /**
+   * 执行流式调用
+   */
+  async executeStream(
+    payload: any,
+    headers?: Record<string, string>
+  ): Promise<ReadableStream<Uint8Array>> {
+    const requestId = headers?.['x-request-id'] || 'unknown';
+    const { model, token } = this.resolveModelAndToken(payload, headers);
+
+    let baseUrl = this.provider.api_base_url;
+    if (!baseUrl.endsWith('/')) {
+      baseUrl += '/';
+    }
+
+    // Vertex AI Stream URL: https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{location}/publishers/google/models/{model}:streamGenerateContent?alt=sse
+    const url = `${baseUrl}${model}:streamGenerateContent?alt=sse`;
+    logger.debug(`[VERTEX_ADAPTER] 发起流式请求. URL: ${baseUrl}${model}:streamGenerateContent`, requestId);
+
+    const reqHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+    };
+    if (token) {
+      reqHeaders['Authorization'] = `Bearer ${token}`;
+    }
+
+    if (headers) {
+      for (const [k, v] of Object.entries(headers)) {
+        const lowerK = k.toLowerCase();
+        if (!['host', 'content-length', 'content-type', 'connection', 'x-api-key', 'x-target-model', 'authorization'].includes(lowerK)) {
+          reqHeaders[k] = v;
+        }
+      }
+    }
+
+    const startTime = Date.now();
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: reqHeaders,
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        logger.error(`[VERTEX_ADAPTER] 流式请求握手失败. Code: ${response.status}. 详情: ${text}`, requestId);
+        throw new Error(`Upstream Vertex stream error (${response.status}): ${text}`);
+      }
+
+      if (!response.body) {
+        throw new Error('Upstream Vertex response body is empty');
+      }
+
+      logger.info(`[VERTEX_ADAPTER] 流式连接成功建立. 握手耗时: ${Date.now() - startTime}ms`, requestId);
+      return response.body as any;
+    } catch (err: any) {
+      logger.error(`[VERTEX_ADAPTER] 流式请求异常. 错误: ${err.message}`, requestId);
+      throw err;
+    }
+  }
+}
