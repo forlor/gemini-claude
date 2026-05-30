@@ -1,0 +1,29 @@
+{
+  "name": "gemini-claude-gateway",
+  "version": "1.0.0",
+  "description": "Gemini to Claude Code API Gateway",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "hono": "^4.6.12",
+    "@hono/node-server": "^1.13.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/node": "^22.10.1",
+    "tsx": "^4.19.2"
+  },
+  "keywords": [
+    "gemini",
+    "claude",
+    "gateway",
+    "api"
+  ],
+  "author": "",
+  "license": "ISC"
+}
