@@ -212,9 +212,17 @@ export class AnthropicToGeminiConverter implements IConverter {
       const budget = request.thinking.budget_tokens;
 
       if (thinkingType === 'enabled') {
-        generationConfig.thinkingConfig = {
+        const thinkingConfig: Record<string, any> = {
           thinkingBudget: budget || 16000
         };
+
+        // 如果是 Gemini 3 系列模型，支持并默认设置 thinkingLevel 为 HIGH
+        if (targetModel.includes('gemini-3')) {
+          const clientLevel = request.thinking.thinking_level || request.thinking.thinkingLevel;
+          thinkingConfig.thinkingLevel = clientLevel || 'HIGH';
+        }
+
+        generationConfig.thinkingConfig = thinkingConfig;
         // 扩展最大输出以容纳思考 token 预算
         generationConfig.maxOutputTokens = (request.max_tokens || 4000) + (budget || 16000);
       }
