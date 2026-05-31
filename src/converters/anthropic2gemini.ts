@@ -269,35 +269,29 @@ export class AnthropicToGeminiConverter implements IConverter {
     // 9. 智能思考深度匹配（Extended Thinking）
     const isThinkingModel = targetModel.includes('pro') || targetModel.includes('think') || options.isThinkingModel;
     if (isThinkingModel) {
-      if (request.thinking && typeof request.thinking === 'object') {
-        const thinkingType = request.thinking.type;
-        const budget = request.thinking.budget_tokens;
+      const thinkingType = request.thinking?.type;
+      const budget = request.thinking?.budget_tokens;
 
-        if (thinkingType === 'enabled') {
-          const thinkingConfig: Record<string, any> = {
-            thinkingBudget: budget || 16000
-          };
-
-          // 如果是 Gemini 3 系列模型，支持并默认设置 thinkingLevel 为 HIGH
-          if (targetModel.includes('gemini-3')) {
-            const clientLevel = request.thinking.thinking_level || request.thinking.thinkingLevel;
-            thinkingConfig.thinkingLevel = clientLevel || 'HIGH';
-          }
-
-          generationConfig.thinkingConfig = thinkingConfig;
-          // 扩展最大输出以容纳思考 token 预算
-          generationConfig.maxOutputTokens = (request.max_tokens || 4000) + (budget || 16000);
-        } else if (thinkingType === 'disabled') {
-          // 显式禁用思考，设置 thinkingBudget 为 0
-          generationConfig.thinkingConfig = {
-            thinkingBudget: 0
-          };
-        }
-      } else {
-        // 客户端没有传入 thinking 设置，或者未开启思考：显式注入 thinkingBudget: 0，强制上游关闭思考，节省 Token 和延迟
+      if (thinkingType === 'disabled') {
+        // 1. 客户端显式设置了关闭：显式注入 thinkingBudget: 0，强制上游关闭思考
         generationConfig.thinkingConfig = {
           thinkingBudget: 0
         };
+      } else {
+        // 2. 客户端显式开启，或者“没有显式设置关闭”（即没传或没有相关设置）：默认开启思考，且默认思考等级为 HIGH
+        const thinkingConfig: Record<string, any> = {
+          thinkingBudget: budget || 16000
+        };
+
+        // 如果是 Gemini 3 系列模型，支持并默认设置 thinkingLevel 为 HIGH
+        if (targetModel.includes('gemini-3')) {
+          const clientLevel = request.thinking?.thinking_level || request.thinking?.thinkingLevel;
+          thinkingConfig.thinkingLevel = clientLevel || 'HIGH';
+        }
+
+        generationConfig.thinkingConfig = thinkingConfig;
+        // 扩展最大输出以容纳思考 token 预算
+        generationConfig.maxOutputTokens = (request.max_tokens || 4000) + (budget || 16000);
       }
     }
 
