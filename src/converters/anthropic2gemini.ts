@@ -10,6 +10,8 @@ import { parseSSEStream } from '../utils/sse-parser.js';
 import { logger } from '../utils/logger.js';
 import crypto from 'node:crypto';
 
+const textEncoder = new TextEncoder();
+
 export class AnthropicToGeminiConverter implements IConverter {
   /**
    * 转换请求体：将标准的 Anthropic 请求转换为目标协议的请求
@@ -53,16 +55,23 @@ export class AnthropicToGeminiConverter implements IConverter {
     const toolMap = buildHistoricalToolMap(request.messages || []);
     const contents: GeminiContent[] = [];
 
-    for (const msg of truncatedMessages) {
+    for (let msgIndex = 0; msgIndex < truncatedMessages.length; msgIndex++) {
+      const msg = truncatedMessages[msgIndex];
       if (!msg || typeof msg !== 'object') continue;
 
       const role = msg.role === 'assistant' ? 'model' : 'user';
       const parts: GeminiPart[] = [];
       const rawContent = msg.content;
 
+      // 如果是最后一条消息，且存在 prefillText，将 prefillText 提示追加到最后一条 user 消息末尾，防止模型“复读”或重新回答历史问题
+      const isLastMessage = msgIndex === truncatedMessages.length - 1;
+      const prefillPrompt = (isLastMessage && role === 'user' && prefillText)
+        ? `\n\n(Note: Please start your response directly with: "${prefillText}")`
+        : '';
+
       if (typeof rawContent === 'string') {
-        if (rawContent.trim()) {
-          parts.push({ text: rawContent });
+        if (rawContent.trim() || prefillPrompt) {
+          parts.push({ text: rawContent + prefillPrompt });
         }
       } else if (Array.isArray(rawContent)) {
         for (const block of rawContent) {
@@ -72,6 +81,13 @@ export class AnthropicToGeminiConverter implements IConverter {
             if (block.text?.trim()) {
               parts.push({ text: block.text });
             }
+          } else if (block.type === 'thinking') {
+            // 历史消息中的 Thinking 块保留，确保严格推理模型的上下文连贯与格式合规
+            parts.push({
+              thought: true,
+              text: block.thinking || '',
+              thoughtSignature: block.signature || undefined
+            } as any);
           } else if (block.type === 'image' || block.type === 'document') {
             const converted = convertMultimodalBlock(block);
             if (converted) {
@@ -81,7 +97,7 @@ export class AnthropicToGeminiConverter implements IConverter {
             // 解码并还原真实的 toolId，剥离 thoughtSignature
             const encodedId = block.id;
             const { originalId, signature } = decodeToolId(encodedId);
-            
+
             const part: any = {
               functionCall: {
                 id: originalId,
@@ -106,24 +122,61 @@ export class AnthropicToGeminiConverter implements IConverter {
               funcName = 'unknown_function';
             }
 
-            // 提取工具输出内容为 string
+            // 提取工具输出内容（支持多模态数据，如图片、截图）
+            const responseObj: Record<string, any> = {};
             let outputText = '';
+
             if (typeof block.content === 'string') {
               outputText = block.content;
             } else if (Array.isArray(block.content)) {
-              outputText = block.content
-                .filter((b: any) => b && (typeof b === 'string' || b.type === 'text'))
-                .map((b: any) => (typeof b === 'string' ? b : b.text || ''))
-                .join('\n');
+              const textParts: string[] = [];
+              for (const subBlock of block.content) {
+                if (subBlock && typeof subBlock === 'object') {
+                  if (subBlock.type === 'text') {
+                    textParts.push(subBlock.text || '');
+                  } else if (subBlock.type === 'image' || subBlock.type === 'document') {
+                    // 支持工具结果中的多模态数据（图片/文档）保留，转换为 inlineData
+                    const converted = convertMultimodalBlock(subBlock);
+                    if (converted && converted.inlineData) {
+                      // 如果有图片，直接合并到 parts 中作为并列节点
+                      parts.push({
+                        functionResponse: {
+                          id: originalId,
+                          name: funcName,
+                          response: {
+                            output: '',
+                            image_data: converted.inlineData
+                          }
+                        }
+                      } as any);
+                    }
+                  }
+                } else if (typeof subBlock === 'string') {
+                  textParts.push(subBlock);
+                }
+              }
+              outputText = textParts.join('\n');
             }
+
+            responseObj.output = outputText;
 
             parts.push({
               functionResponse: {
                 id: originalId,
                 name: funcName,
-                response: { output: outputText }
+                response: responseObj
               }
             });
+          }
+        }
+
+        // 如果有 prefillPrompt，追加到最后一个 text part 后面，或者新建一个 text part
+        if (prefillPrompt) {
+          const lastPart = parts[parts.length - 1];
+          if (lastPart && 'text' in lastPart) {
+            lastPart.text = (lastPart.text || '') + prefillPrompt;
+          } else {
+            parts.push({ text: prefillPrompt });
           }
         }
       }
@@ -149,13 +202,13 @@ export class AnthropicToGeminiConverter implements IConverter {
         const name = tool.name;
         const description = tool.description || '';
         const inputSchema = tool.input_schema || {};
-        
+
         const cleanedSchema = cleanAndCaseJsonSchema(inputSchema, isUppercase ? 'uppercase' : 'lowercase');
 
         casedTools.push({
           name,
           description,
-          parametersJsonSchema: cleanedSchema
+          parameters: cleanedSchema
         });
       }
 
@@ -179,6 +232,8 @@ export class AnthropicToGeminiConverter implements IConverter {
         toolConfig = { functionCallingConfig: { mode: 'AUTO' } };
       } else if (choiceType === 'any') {
         toolConfig = { functionCallingConfig: { mode: 'ANY' } };
+      } else if (choiceType === 'none') {
+        toolConfig = { functionCallingConfig: { mode: 'NONE' } };
       } else if (choiceType === 'tool') {
         const toolName = request.tool_choice.name;
         if (toolName) {
@@ -225,6 +280,11 @@ export class AnthropicToGeminiConverter implements IConverter {
         generationConfig.thinkingConfig = thinkingConfig;
         // 扩展最大输出以容纳思考 token 预算
         generationConfig.maxOutputTokens = (request.max_tokens || 4000) + (budget || 16000);
+      } else if (thinkingType === 'disabled') {
+        // 显式禁用思考，设置 thinkingBudget 为 0
+        generationConfig.thinkingConfig = {
+          thinkingBudget: 0
+        };
       }
     }
 
@@ -409,12 +469,12 @@ export class AnthropicToGeminiConverter implements IConverter {
 
         function sseEmit(event: string, data: any) {
           const raw = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-          controller.enqueue(new TextEncoder().encode(raw));
+          controller.enqueue(textEncoder.encode(raw));
         }
 
         // 启动心跳定时器
         pingInterval = setInterval(() => {
-          controller.enqueue(new TextEncoder().encode(': ping\n\n'));
+          controller.enqueue(textEncoder.encode(': ping\n\n'));
         }, 15000);
 
         function closeBlock() {
@@ -687,7 +747,23 @@ export class AnthropicToGeminiConverter implements IConverter {
           });
         } finally {
           if (pingInterval) clearInterval(pingInterval);
-          controller.close();
+          try {
+            controller.close();
+          } catch (e) {
+            // 忽略已被关闭的控制器异常
+          }
+        }
+      },
+      cancel(reason) {
+        logger.info(`[CONVERTER_STREAM] 客户端断开连接 (原因: ${reason || 'unknown'}). 正在清理资源...`, requestId);
+        if (pingInterval) {
+          clearInterval(pingInterval);
+        }
+        // 尝试取消上游流的读取，彻底释放连接
+        try {
+          upstreamStream.cancel().catch(() => {});
+        } catch (e) {
+          // 忽略取消异常
         }
       }
     });

@@ -25,6 +25,11 @@ export class GeminiAdapter implements IAdapter {
       }
     }
 
+    // 剥离可能存在的 models/ 前缀，防止拼接出双重前缀的无效 URL
+    if (model && model.startsWith('models/')) {
+      model = model.substring(7);
+    }
+
     // 2. 提取 apiKey
     let apiKey = headers?.['x-api-key'] || headers?.['X-Api-Key'] || this.provider.api_key;
     if (!apiKey) {

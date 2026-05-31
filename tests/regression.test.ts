@@ -232,8 +232,55 @@ async function runTests() {
     messages: [{ role: 'user', content: 'A '.repeat(500) }] // Exceeds threshold of 50 tokens
   });
   assert(targetLong.provider.name === 'vertex', 'Long context should route to longContext provider (vertex)');
-  
+
   console.log('✅ Test 7 Passed: Router Engine & Prioritization works beautifully.\n');
+
+  // ==========================================
+  // Test 8: Advanced Protocol & Performance Fixes
+  // ==========================================
+  console.log('Running Test 8: Advanced Protocol & Performance Fixes...');
+
+  // 1. 多模态 Token 估算验证
+  const multimodalReq = {
+    model: 'claude-3-7-sonnet',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Analyze this image' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abc' } }
+        ]
+      }
+    ]
+  };
+  const multimodalTokens = estimateRequestTokens(multimodalReq);
+  assert(multimodalTokens > 258, 'Multimodal token count should include image heuristic tokens');
+
+  // 2. Nullable 转换验证
+  const nullableSchema = {
+    type: 'object',
+    properties: {
+      tags: {
+        anyOf: [
+          { type: 'array', items: { type: 'string' } },
+          { type: 'null' }
+        ]
+      }
+    },
+    required: ['tags']
+  };
+  const cleanedNullable = cleanAndCaseJsonSchema(nullableSchema, 'uppercase');
+  assert(cleanedNullable.properties.tags.nullable === true, 'Nullable union type should set nullable: true');
+
+  // 3. 空属性 Required 清理验证
+  const emptyPropSchema = {
+    type: 'object',
+    required: ['missing_field']
+  };
+  const cleanedEmptyProp = cleanAndCaseJsonSchema(emptyPropSchema, 'uppercase');
+  assert(cleanedEmptyProp.required === undefined, 'Required array should be deleted if properties are empty or missing');
+
+  console.log('✅ Test 8 Passed: Advanced Protocol & Performance Fixes verified successfully.\n');
 
   console.log('🎉 ALL REGRESSION TESTS PASSED SUCCESSFULLY! 100% PROTOCOL COMPLIANT! 🎉');
 }

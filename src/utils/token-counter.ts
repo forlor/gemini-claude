@@ -41,6 +41,7 @@ export function estimateTokens(text: string): number {
 export function estimateRequestTokens(request: any): number {
   if (!request) return 0;
   let totalText = '';
+  let multimodalTokens = 0;
 
   // 1. 累加 System Prompt
   if (request.system) {
@@ -66,12 +67,20 @@ export function estimateRequestTokens(request: any): number {
         for (const part of msg.content) {
           if (part?.type === 'text') {
             totalText += part.text || '';
+          } else if (part?.type === 'image') {
+            multimodalTokens += 258; // 每一张图片估算为 258 个 Token
+          } else if (part?.type === 'document') {
+            multimodalTokens += 500; // 每一个文档块估算为 500 个 Token
           } else if (part?.type === 'tool_result' && typeof part.content === 'string') {
             totalText += part.content;
           } else if (part?.type === 'tool_result' && Array.isArray(part.content)) {
             for (const sub of part.content) {
               if (sub?.type === 'text') {
                 totalText += sub.text || '';
+              } else if (sub?.type === 'image') {
+                multimodalTokens += 258;
+              } else if (sub?.type === 'document') {
+                multimodalTokens += 500;
               }
             }
           }
@@ -85,5 +94,5 @@ export function estimateRequestTokens(request: any): number {
     totalText += JSON.stringify(request.tools);
   }
 
-  return estimateTokens(totalText);
+  return estimateTokens(totalText) + multimodalTokens;
 }

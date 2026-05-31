@@ -7,7 +7,7 @@ const UNSUPPORTED_KEYS = new Set([
   'example', 'examples', 'readOnly', 'writeOnly', 'default',
   'exclusiveMaximum', 'exclusiveMinimum', 'const', 'additionalItems',
   'contains', 'patternProperties', 'dependencies', 'propertyNames',
-  'if', 'then', 'else', 'contentEncoding', 'contentMediaType', 'nullable',
+  'if', 'then', 'else', 'contentEncoding', 'contentMediaType',
   'additionalProperties'
 ]);
 
@@ -43,14 +43,15 @@ export function cleanAndCaseJsonSchema(schema: any, typeCasing: 'uppercase' | 'l
   // 2. 转换 type 字段并处理 anyOf/oneOf 联合类型
   if ('type' in schema) {
     let typeValue = schema.type;
-    
+
     // 如果 type 是数组，例如 ["string", "null"]，将其简化为单个非空类型，并记录为 nullable
     if (Array.isArray(typeValue)) {
       const nonNullTypes = typeValue.filter(t => typeof t === 'string' && t.toLowerCase() !== 'null');
       const hasNull = typeValue.some(t => typeof t === 'string' && t.toLowerCase() === 'null');
-      
+
       typeValue = nonNullTypes[0] || 'string';
       if (hasNull) {
+        result.nullable = true;
         validations.push('nullable: true');
       }
     }
@@ -62,6 +63,7 @@ export function cleanAndCaseJsonSchema(schema: any, typeCasing: 'uppercase' | 'l
         result.type = typeCasing === 'uppercase' ? lowerType.toUpperCase() : lowerType;
       } else if (lowerType === 'null') {
         result.type = typeCasing === 'uppercase' ? 'STRING' : 'string';
+        result.nullable = true;
         validations.push('nullable: true');
       }
     }
@@ -71,12 +73,19 @@ export function cleanAndCaseJsonSchema(schema: any, typeCasing: 'uppercase' | 'l
   if ('anyOf' in schema || 'oneOf' in schema) {
     const unionKey = 'anyOf' in schema ? 'anyOf' : 'oneOf';
     const unionItems = schema[unionKey];
-    
+
     if (Array.isArray(unionItems) && unionItems.length > 0) {
+      // 检查联合类型中是否包含 null 类型
+      const hasNullInUnion = unionItems.some(item => item && (item.type === 'null' || (Array.isArray(item.type) && item.type.includes('null'))));
+      if (hasNullInUnion) {
+        result.nullable = true;
+        validations.push('nullable: true');
+      }
+
       // 查找并保留第一个带有 properties 或复杂类型的分支
       const preferred = unionItems.find(item => item && (item.type === 'object' || item.type === 'array' || item.properties || item.items))
         || unionItems.find(item => item && item.type);
-        
+
       if (preferred) {
         // 递归清洗选中的分支
         const cleanedPreferred = cleanAndCaseJsonSchema(preferred, typeCasing);
@@ -126,10 +135,10 @@ export function cleanAndCaseJsonSchema(schema: any, typeCasing: 'uppercase' | 'l
   }
 
   // 7. 清理 required 属性（防止 required 包含已被剥离的空属性或无效字段）
-  if (Array.isArray(schema.required) && result.properties) {
-    const validProps = new Set(Object.keys(result.properties));
+  if (Array.isArray(schema.required)) {
+    const validProps = result.properties ? new Set(Object.keys(result.properties)) : new Set();
     const filteredRequired = schema.required.filter((item: any) => typeof item === 'string' && validProps.has(item));
-    
+
     if (filteredRequired.length > 0) {
       result.required = filteredRequired;
     } else {

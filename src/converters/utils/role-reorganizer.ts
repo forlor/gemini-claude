@@ -197,22 +197,29 @@ export function reorganizeToolMessages(contents: GeminiContent[]): GeminiContent
 
   // 3. 按交替对话机制重组
   const reorganized: GeminiContent[] = [];
+  const usedToolResponseParts = new Set<GeminiPart>();
   let i = 0;
 
   while (i < len(flattened)) {
     const current = flattened[i];
     const part = current.parts[0];
 
-    // 如果是单个 functionResponse，因为它的对应 functionCall 在前面已经和其成对匹配过并输出了，这里可以直接跳过
+    // 如果是单个 functionResponse，且在前面已经和其对应的 functionCall 成对匹配并写入过，则跳过
     if (part && part.functionResponse) {
+      if (usedToolResponseParts.has(part)) {
+        i++;
+        continue;
+      }
+      // 如果没有被成对写入过，说明这是一个孤立的或无 ID 的工具结果，我们将其作为普通消息保留并原样写入，绝不丢弃！
+      reorganized.push(current);
       i++;
       continue;
     }
 
-    // 如果是 functionCall，强行将其和对应的 functionResponse 组织成一个紧密交替对
+    // 如果是 functionCall，强行将其 and 对应的 functionResponse 组织成一个紧密交替对
     if (part && part.functionCall) {
       const toolId = part.functionCall.id;
-      
+
       // 写入当前 functionCall (model 角色)
       reorganized.push({
         role: 'model',
@@ -221,10 +228,12 @@ export function reorganizeToolMessages(contents: GeminiContent[]): GeminiContent
 
       // 紧接着寻找并写入对应的 functionResponse (user 角色)
       if (toolId !== undefined && toolId !== null && toolResults[String(toolId)]) {
+        const matchedResponse = toolResults[String(toolId)];
         reorganized.push({
           role: 'user',
-          parts: [toolResults[String(toolId)]]
+          parts: [matchedResponse]
         });
+        usedToolResponseParts.add(matchedResponse);
       } else {
         logger.warn(`[REORGANIZER] 未能在上下文中找到 tool_use_id 为 '${toolId}' 的工具执行结果!`, 'role-reorganizer');
       }
@@ -238,7 +247,21 @@ export function reorganizeToolMessages(contents: GeminiContent[]): GeminiContent
     i++;
   }
 
-  return mergeSameRoleMessages(reorganized);
+  const finalMerged = mergeSameRoleMessages(reorganized);
+
+  // 4. 递归剥离所有非标准的 id 字段，确保完全符合 Gemini 官方 API 规范，防止 Vertex AI 返回 400 错误
+  for (const content of finalMerged) {
+    for (const part of content.parts) {
+      if (part.functionCall) {
+        delete (part.functionCall as any).id;
+      }
+      if (part.functionResponse) {
+        delete (part.functionResponse as any).id;
+      }
+    }
+  }
+
+  return finalMerged;
 }
 
 // 辅助：TS 环境下的长度获取

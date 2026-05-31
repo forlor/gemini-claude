@@ -49,16 +49,31 @@ function cleanupCacheRegistry() {
 }
 
 /**
+ * 确定性 JSON 序列化，对对象键进行排序，保证语义相同的对象生成 100% 相同的字符串
+ */
+function stableStringify(obj: any): string {
+  if (obj === null || typeof obj !== 'object') {
+    return JSON.stringify(obj);
+  }
+  if (Array.isArray(obj)) {
+    return '[' + obj.map(stableStringify).join(',') + ']';
+  }
+  const sortedKeys = Object.keys(obj).sort();
+  const parts = sortedKeys.map(key => `${JSON.stringify(key)}:${stableStringify(obj[key])}`);
+  return '{' + parts.join(',') + '}';
+}
+
+/**
  * 计算输入内容列表的确定性 SHA-256 HASH，用于零时延缓存匹配
  */
 function calculatePrefixHash(contents: any[], systemInstruction?: any): string {
   const hash = crypto.createHash('sha256');
-  
+
   if (systemInstruction) {
-    hash.update(JSON.stringify(systemInstruction));
+    hash.update(stableStringify(systemInstruction));
   }
-  
-  hash.update(JSON.stringify(contents));
+
+  hash.update(stableStringify(contents));
   return hash.digest('hex');
 }
 
@@ -153,9 +168,18 @@ export async function detectAndApplyCaching(
   logger.info(`[CONTEXT_CACHE] Cache Miss. 历史前缀满足缓存条件 (长度: ${totalChars} 字符)，准备注册上游缓存...`, requestId);
 
   try {
+    const cleanBaseUrl = apiBaseUrl.endsWith('/') ? apiBaseUrl.slice(0, -1) : apiBaseUrl;
+
+    let cacheModelPath = modelNamePath;
+    if (cleanBaseUrl.includes('aiplatform.googleapis.com')) {
+      // Vertex AI 专属缓存模型路径格式: publishers/google/models/{model}
+      const cleanModelName = model.startsWith('models/') ? model.substring(7) : model;
+      cacheModelPath = `publishers/google/models/${cleanModelName}`;
+    }
+
     // 准备创建缓存的请求体
     const cacheRequestBody = {
-      model: modelNamePath,
+      model: cacheModelPath,
       contents: cachePrefixContents,
       systemInstruction: systemInstruction,
       ttl: '1800s', // 默认生命周期 30 分钟
@@ -163,7 +187,6 @@ export async function detectAndApplyCaching(
     };
 
     // 构建创建缓存的官方端点 URL
-    const cleanBaseUrl = apiBaseUrl.endsWith('/') ? apiBaseUrl.slice(0, -1) : apiBaseUrl;
     // 上游标准端点：https://generativelanguage.googleapis.com/v1beta/cachedContents?key=...
     // 或者是：${api_base_url}/v1beta/cachedContents?key=...
     let createUrl = '';
