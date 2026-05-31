@@ -80,15 +80,21 @@ export class AnthropicToGeminiConverter implements IConverter {
           } else if (block.type === 'tool_use') {
             // 解码并还原真实的 toolId，剥离 thoughtSignature
             const encodedId = block.id;
-            const { originalId } = decodeToolId(encodedId);
+            const { originalId, signature } = decodeToolId(encodedId);
             
-            parts.push({
+            const part: any = {
               functionCall: {
                 id: originalId,
                 name: block.name,
                 args: block.input || {}
               }
-            });
+            };
+
+            if (signature) {
+              part.thoughtSignature = signature;
+            }
+
+            parts.push(part);
           } else if (block.type === 'tool_result') {
             // 解码并还原 tool_use_id
             const encodedUseId = block.tool_use_id;
