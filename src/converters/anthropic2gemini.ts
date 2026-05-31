@@ -36,8 +36,14 @@ export class AnthropicToGeminiConverter implements IConverter {
           .map((block: any) => (typeof block === 'string' ? block : block.text || ''))
           .join('\n');
       }
-      
+
       if (systemText.trim()) {
+        // 计划模式提示词对齐优化：自动探测并强力约束 Gemini 在计划模式下的输出行为，防止其将计划泄露到主界面
+        const isPlanMode = systemText.includes('ExitPlanMode') || systemText.includes('plan file');
+        if (isPlanMode) {
+          systemText += `\n\n[CRITICAL INSTRUCTION FOR PLAN MODE: You are currently in PLAN MODE. You MUST write the detailed plan ONLY to the specified plan file using the Write/Edit tool. Do NOT print the detailed plan, code blocks, or sections in your text response to the user. Your text response MUST be extremely brief (1-2 sentences max), simply stating that you have written the plan to the file. This is a strict constraint to avoid UI clutter.]`;
+        }
+
         systemInstruction = {
           parts: [{ text: systemText }]
         };
@@ -262,26 +268,33 @@ export class AnthropicToGeminiConverter implements IConverter {
 
     // 9. 智能思考深度匹配（Extended Thinking）
     const isThinkingModel = targetModel.includes('pro') || targetModel.includes('think') || options.isThinkingModel;
-    if (isThinkingModel && request.thinking && typeof request.thinking === 'object') {
-      const thinkingType = request.thinking.type;
-      const budget = request.thinking.budget_tokens;
+    if (isThinkingModel) {
+      if (request.thinking && typeof request.thinking === 'object') {
+        const thinkingType = request.thinking.type;
+        const budget = request.thinking.budget_tokens;
 
-      if (thinkingType === 'enabled') {
-        const thinkingConfig: Record<string, any> = {
-          thinkingBudget: budget || 16000
-        };
+        if (thinkingType === 'enabled') {
+          const thinkingConfig: Record<string, any> = {
+            thinkingBudget: budget || 16000
+          };
 
-        // 如果是 Gemini 3 系列模型，支持并默认设置 thinkingLevel 为 HIGH
-        if (targetModel.includes('gemini-3')) {
-          const clientLevel = request.thinking.thinking_level || request.thinking.thinkingLevel;
-          thinkingConfig.thinkingLevel = clientLevel || 'HIGH';
+          // 如果是 Gemini 3 系列模型，支持并默认设置 thinkingLevel 为 HIGH
+          if (targetModel.includes('gemini-3')) {
+            const clientLevel = request.thinking.thinking_level || request.thinking.thinkingLevel;
+            thinkingConfig.thinkingLevel = clientLevel || 'HIGH';
+          }
+
+          generationConfig.thinkingConfig = thinkingConfig;
+          // 扩展最大输出以容纳思考 token 预算
+          generationConfig.maxOutputTokens = (request.max_tokens || 4000) + (budget || 16000);
+        } else if (thinkingType === 'disabled') {
+          // 显式禁用思考，设置 thinkingBudget 为 0
+          generationConfig.thinkingConfig = {
+            thinkingBudget: 0
+          };
         }
-
-        generationConfig.thinkingConfig = thinkingConfig;
-        // 扩展最大输出以容纳思考 token 预算
-        generationConfig.maxOutputTokens = (request.max_tokens || 4000) + (budget || 16000);
-      } else if (thinkingType === 'disabled') {
-        // 显式禁用思考，设置 thinkingBudget 为 0
+      } else {
+        // 客户端没有传入 thinking 设置，或者未开启思考：显式注入 thinkingBudget: 0，强制上游关闭思考，节省 Token 和延迟
         generationConfig.thinkingConfig = {
           thinkingBudget: 0
         };
