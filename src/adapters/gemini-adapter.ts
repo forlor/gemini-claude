@@ -55,7 +55,7 @@ export class GeminiAdapter implements IAdapter {
       baseUrl += '/';
     }
 
-    const url = `${baseUrl}${model}:generateContent?key=${apiKey}`;
+    const url = `${baseUrl}${model}:generateContent`;
     logger.debug(`[GEMINI_ADAPTER] 发起非流式请求. URL: ${baseUrl}${model}:generateContent`, requestId);
 
     const reqHeaders: Record<string, string> = {
@@ -125,7 +125,7 @@ export class GeminiAdapter implements IAdapter {
       baseUrl += '/';
     }
 
-    const url = `${baseUrl}${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
+    const url = `${baseUrl}${model}:streamGenerateContent?alt=sse`;
     logger.debug(`[GEMINI_ADAPTER] 发起流式请求. URL: ${baseUrl}${model}:streamGenerateContent`, requestId);
 
     const reqHeaders: Record<string, string> = {

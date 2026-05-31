@@ -177,52 +177,7 @@ export class RouterEngine {
   }
 
   /**
-   * 生成所有候选降级级联目标 (Task 5.3)
-   */
-  public getFallbackCandidates(primary: RouteTarget): RouteTarget[] {
-    const candidates: RouteTarget[] = [primary];
-
-    // 1. 寻找支持完全相同 targetModel 的其他提供商
-    const peerProviders = this.config.Providers.filter(
-      p => p.name !== primary.provider.name && p.models.includes(primary.targetModel)
-    );
-
-    for (const prov of peerProviders) {
-      const adapter = this.getAdapterForProvider(prov);
-      candidates.push({
-        provider: prov,
-        targetModel: primary.targetModel,
-        converter: this.converter,
-        adapter
-      });
-    }
-
-    // 2. 如果是 Pro 系列模型，备选降级可以追加到 Flash 模型
-    if (primary.targetModel.includes('pro') || primary.targetModel.includes('sonnet')) {
-      const backupModel = 'gemini-2.5-flash';
-      const flashProviders = this.config.Providers.filter(p => p.models.includes(backupModel));
-      for (const prov of flashProviders) {
-        // 避免重复加入同一个 provider+model
-        const alreadyExists = candidates.some(
-          c => c.provider.name === prov.name && c.targetModel === backupModel
-        );
-        if (!alreadyExists) {
-          const adapter = this.getAdapterForProvider(prov);
-          candidates.push({
-            provider: prov,
-            targetModel: backupModel,
-            converter: this.converter,
-            adapter
-          });
-        }
-      }
-    }
-
-    return candidates;
-  }
-
-  /**
-   * 统一级联故障转移与指数避让重试执行入口 (Task 5.3)
+   * 统一执行请求（仅进行协议翻译，不进行级联重试）
    */
   public async executeRequestWithFallback(
     request: any,
@@ -231,93 +186,53 @@ export class RouterEngine {
     requestId: string
   ): Promise<any> {
     // 1. 动态解析首选路由目标
-    const primary = await this.resolve(request, { ...headers, 'x-request-id': requestId });
+    const target = await this.resolve(request, { ...headers, 'x-request-id': requestId });
 
-    // 2. 获取候选的级联降级链
-    const candidates = this.getFallbackCandidates(primary);
-    let lastError: any = null;
+    // 2. 转换请求体
+    const converterOptions: Record<string, any> = {
+      requestId,
+      apiKey: target.provider.api_key,
+      apiBaseUrl: target.provider.api_base_url,
+      providerType: target.provider.type
+    };
+    const convertedPayload = await target.converter.convertRequest(request, target.targetModel, converterOptions);
 
-    for (let i = 0; i < candidates.length; i++) {
-      const target = candidates[i];
-      const isLastCandidate = i === candidates.length - 1;
+    // 3. 构建请求头
+    const activeHeaders: Record<string, string> = {
+      ...headers,
+      'x-target-model': target.targetModel,
+      'x-request-id': requestId
+    };
 
-      let retries = 3;
-      let delay = 500; // 毫秒
+    logger.info(`[ROUTER] 发起请求: [${target.provider.name}] -> [${target.targetModel}] (类型: ${target.provider.type})`, requestId);
 
-      while (retries > 0) {
-        try {
-          logger.info(`[CASCADE] 尝试通道: [${target.provider.name}] -> [${target.targetModel}] (类型: ${target.provider.type}). 剩余尝试: ${retries}`, requestId);
+    // 4. 执行调用
+    try {
+      if (isStream) {
+        const rawStream = await target.adapter.executeStream(convertedPayload, activeHeaders);
+        
+        logger.info(`[ROUTER] 通道 [${target.provider.name}] 握手成功，正在转换流式响应`, requestId);
+        return target.converter.convertStream(rawStream, target.targetModel, {
+          requestId,
+          prefillText: converterOptions.prefillText
+        });
+      } else {
+        const response = await target.adapter.execute(convertedPayload, activeHeaders);
 
-          // A. 转换请求体
-          const converterOptions: Record<string, any> = {
+        if (response.status === 200) {
+          logger.info(`[ROUTER] 通道 [${target.provider.name}] 请求成功. 状态码: 200`, requestId);
+          return await target.converter.convertResponse(response.body, target.targetModel, {
             requestId,
-            apiKey: target.provider.api_key,
-            apiBaseUrl: target.provider.api_base_url,
-            providerType: target.provider.type
-          };
-          const convertedPayload = await target.converter.convertRequest(request, target.targetModel, converterOptions);
-
-          // B. 构建请求头
-          const activeHeaders: Record<string, string> = {
-            ...headers,
-            'x-target-model': target.targetModel,
-            'x-request-id': requestId
-          };
-
-          // C. 执行调用
-          if (isStream) {
-            const rawStream = await target.adapter.executeStream(convertedPayload, activeHeaders);
-            
-            // 握手成功，将其交由转换器转换成标准的 Anthropic SSE 事件流
-            logger.info(`[CASCADE] 通道 [${target.provider.name}] 握手成功，正在转换流式响应`, requestId);
-            return target.converter.convertStream(rawStream, target.targetModel, {
-              requestId,
-              prefillText: converterOptions.prefillText
-            });
-          } else {
-            const response = await target.adapter.execute(convertedPayload, activeHeaders);
-
-            if (response.status === 200) {
-              logger.info(`[CASCADE] 通道 [${target.provider.name}] 成功返回. 状态码: 200`, requestId);
-              return await target.converter.convertResponse(response.body, target.targetModel, {
-                requestId,
-                prefillText: converterOptions.prefillText
-              });
-            } else if (response.status === 429) {
-              if (!isLastCandidate) {
-                logger.warn(`[CASCADE] 通道 [${target.provider.name}] 触发频控/配额超限(429). 立即切换至下一个备选通道.`, requestId);
-                break; // 跳出当前重试循环，直接进入下一个 candidate
-              }
-              throw new Error(`Upstream rate limit (429): ${JSON.stringify(response.body)}`);
-            } else if (response.status >= 500) {
-              throw new Error(`Upstream server error (${response.status}): ${JSON.stringify(response.body)}`);
-            } else {
-              // 400, 401, 403, 404 等请求级别 validation error，一般不需要重试
-              throw new Error(`Upstream validation error (${response.status}): ${JSON.stringify(response.body)}`);
-            }
-          }
-        } catch (err: any) {
-          lastError = err;
-          logger.warn(`[CASCADE] 调用 [${target.provider.name}] 失败. 错误: ${err.message}`, requestId);
-
-          // 如果是 400 / 校验或鉴权错误，且不是最后一个候选者，立即启动通道降级
-          const isValidationError = err.message.includes('validation error') || err.message.includes('400') || err.message.includes('401') || err.message.includes('403');
-          if (isValidationError && !isLastCandidate) {
-            logger.warn(`[CASCADE] 发生非重试性校验/配置错误，静默切换下一个通道.`, requestId);
-            break; // 直接进入下一个 candidate
-          }
-
-          retries--;
-          if (retries > 0) {
-            logger.info(`[CASCADE] 指数退避等待 ${delay}ms 后进行下一次重试...`, requestId);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            delay *= 2;
-          }
+            prefillText: converterOptions.prefillText
+          });
+        } else {
+          logger.error(`[ROUTER] 通道 [${target.provider.name}] 请求失败. 状态码: ${response.status}`, requestId);
+          throw new Error(`Upstream request error (${response.status}): ${JSON.stringify(response.body)}`);
         }
       }
+    } catch (err: any) {
+      logger.error(`[ROUTER] 调用 [${target.provider.name}] 异常. 错误: ${err.message}`, requestId);
+      throw err;
     }
-
-    logger.error(`[CASCADE] 严重错误：所有通道和重试选项全部耗尽！`, requestId);
-    throw lastError || new Error('All cascade routing candidates exhausted.');
   }
 }

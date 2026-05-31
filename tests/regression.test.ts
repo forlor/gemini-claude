@@ -233,12 +233,6 @@ async function runTests() {
   });
   assert(targetLong.provider.name === 'vertex', 'Long context should route to longContext provider (vertex)');
   
-  // 4. Fallback candidates verification
-  const fallbacks = engine.getFallbackCandidates(targetDefault);
-  assert(fallbacks.length === 3, 'Should find 3 fallback targets: primary, other provider supporting same model, and flash fallback');
-  assert(fallbacks[1].provider.name === 'vertex', 'Second candidate should be vertex with same model');
-  assert(fallbacks[2].targetModel === 'gemini-2.5-flash', 'Third candidate should cascade to flash model');
-
   console.log('✅ Test 7 Passed: Router Engine & Prioritization works beautifully.\n');
 
   console.log('🎉 ALL REGRESSION TESTS PASSED SUCCESSFULLY! 100% PROTOCOL COMPLIANT! 🎉');

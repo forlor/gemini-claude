@@ -11,6 +11,44 @@ interface CacheEntry {
 const cacheRegistry = new Map<string, CacheEntry>();
 
 /**
+ * 清理过期的缓存条目，并限制 Map 最大容量为 1000 以防止内存泄漏
+ */
+function cleanupCacheRegistry() {
+  const MAX_ENTRIES = 1000;
+  const TRIGGER_THRESHOLD = 1050;
+
+  // 只有当 Map 大小超过触发阈值时，才进行清理，避免每次写入都执行昂贵的 Array.from
+  if (cacheRegistry.size <= TRIGGER_THRESHOLD) {
+    return;
+  }
+
+  const now = new Date();
+
+  // 1. 清理已过期的缓存
+  for (const [key, entry] of cacheRegistry.entries()) {
+    if (entry.expireTime) {
+      const expireDate = new Date(entry.expireTime);
+      if (expireDate < now) {
+        cacheRegistry.delete(key);
+      }
+    }
+  }
+
+  // 2. 如果大小仍然超过 MAX_ENTRIES，进行批量淘汰 (FIFO)
+  if (cacheRegistry.size > MAX_ENTRIES) {
+    const excessCount = cacheRegistry.size - MAX_ENTRIES;
+    const keysIterator = cacheRegistry.keys();
+    for (let i = 0; i < excessCount; i++) {
+      const nextKey = keysIterator.next();
+      if (nextKey.done) {
+        break;
+      }
+      cacheRegistry.delete(nextKey.value);
+    }
+  }
+}
+
+/**
  * 计算输入内容列表的确定性 SHA-256 HASH，用于零时延缓存匹配
  */
 function calculatePrefixHash(contents: any[], systemInstruction?: any): string {
@@ -92,8 +130,17 @@ export async function detectAndApplyCaching(
   // 3. 检查本地内存映射表，若是 Cache Hit，则瞬间就地引用，实现 0ms 接入耗时
   if (cacheRegistry.has(prefixHash)) {
     const entry = cacheRegistry.get(prefixHash)!;
-    // 检查缓存对应的模型是否相同
-    if (entry.model === modelNamePath) {
+    let isExpired = false;
+    if (entry.expireTime) {
+      const expireDate = new Date(entry.expireTime);
+      if (expireDate < new Date()) {
+        isExpired = true;
+        cacheRegistry.delete(prefixHash);
+      }
+    }
+
+    // 检查缓存对应的模型是否相同且未过期
+    if (!isExpired && entry.model === modelNamePath) {
       logger.info(`[CONTEXT_CACHE] ⚡ Cache Hit! 已直接挂载上游缓存: ${entry.cachedContentId}`, requestId);
       return {
         ...geminiRequest,
@@ -122,16 +169,17 @@ export async function detectAndApplyCaching(
     let createUrl = '';
     if (cleanBaseUrl.includes('v1beta')) {
       const parts = cleanBaseUrl.split('/v1beta');
-      createUrl = `${parts[0]}/v1beta/cachedContents?key=${apiKey}`;
+      createUrl = `${parts[0]}/v1beta/cachedContents`;
     } else {
-      createUrl = `${cleanBaseUrl}/cachedContents?key=${apiKey}`;
+      createUrl = `${cleanBaseUrl}/cachedContents`;
     }
 
     const t0 = Date.now();
     const response = await fetch(createUrl, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey
       },
       body: JSON.stringify(cacheRequestBody)
     });
@@ -143,6 +191,7 @@ export async function detectAndApplyCaching(
       const duration = Date.now() - t0;
 
       if (cachedContentId) {
+        cleanupCacheRegistry();
         cacheRegistry.set(prefixHash, {
           cachedContentId,
           expireTime,

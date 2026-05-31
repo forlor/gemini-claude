@@ -238,7 +238,7 @@ export function reorganizeToolMessages(contents: GeminiContent[]): GeminiContent
     i++;
   }
 
-  return reorganized;
+  return mergeSameRoleMessages(reorganized);
 }
 
 // 辅助：TS 环境下的长度获取

@@ -84,10 +84,15 @@ export function injectPrefillToResponse(response: any, prefillText: string): any
     if (firstTextBlock) {
       firstTextBlock.text = prefillText + (firstTextBlock.text || '');
     } else {
-      cloned.unshift({
+      const textBlock = {
         type: 'text',
         text: prefillText
-      });
+      };
+      if (cloned.length > 0 && cloned[0] && cloned[0].type === 'thinking') {
+        cloned.splice(1, 0, textBlock);
+      } else {
+        cloned.unshift(textBlock);
+      }
     }
     return cloned;
   }
@@ -102,10 +107,15 @@ export function injectPrefillToResponse(response: any, prefillText: string): any
     if (firstTextBlock) {
       firstTextBlock.text = prefillText + (firstTextBlock.text || '');
     } else {
-      clonedContent.unshift({
+      const textBlock = {
         type: 'text',
         text: prefillText
-      });
+      };
+      if (clonedContent.length > 0 && clonedContent[0] && clonedContent[0].type === 'thinking') {
+        clonedContent.splice(1, 0, textBlock);
+      } else {
+        clonedContent.unshift(textBlock);
+      }
     }
     clonedResponse.content = clonedContent;
   } else if (typeof content === 'string') {

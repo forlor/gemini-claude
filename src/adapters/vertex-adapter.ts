@@ -1,19 +1,22 @@
 import { IAdapter, AdapterResponse } from './types.js';
 import { ProviderConfig } from '../config.js';
 import { logger } from '../utils/logger.js';
-import { execSync } from 'node:child_process';
+import { exec } from 'node:child_process';
 
 export class VertexGeminiAdapter implements IAdapter {
   name: string;
   type: 'vertex-gemini' = 'vertex-gemini';
   private provider: ProviderConfig;
+  private cachedToken: string = '';
+  private tokenExpiry: number = 0;
+  private lastGcloudFailureTime: number = 0;
 
   constructor(provider: ProviderConfig) {
     this.name = provider.name;
     this.provider = provider;
   }
 
-  private resolveModelAndToken(payload: any, headers?: Record<string, string>) {
+  private async resolveModelAndToken(payload: any, headers?: Record<string, string>) {
     // 1. 提取 target model
     let model = headers?.['x-target-model'] || headers?.['X-Target-Model'] || payload?._targetModel;
     if (!model) {
@@ -29,7 +32,7 @@ export class VertexGeminiAdapter implements IAdapter {
     if (token && token.startsWith('Bearer ')) {
       token = token.substring(7);
     } else {
-      token = this.getBearerToken();
+      token = await this.getBearerToken();
     }
 
     // 清洗临时字段
@@ -40,7 +43,7 @@ export class VertexGeminiAdapter implements IAdapter {
     return { model, token };
   }
 
-  private getBearerToken(): string {
+  private async getBearerToken(): Promise<string> {
     if (this.provider.api_key && !this.provider.api_key.startsWith('$')) {
       return this.provider.api_key;
     }
@@ -54,21 +57,42 @@ export class VertexGeminiAdapter implements IAdapter {
       return process.env.VERTEX_API_KEY;
     }
 
-    // 智能开发者回退：尝试通过 gcloud cli 获取
-    try {
-      const gcloudToken = execSync('gcloud auth print-access-token', {
-        stdio: ['ignore', 'pipe', 'ignore'],
-        timeout: 2000
-      }).toString().trim();
-      if (gcloudToken) {
-        logger.info('[VERTEX_ADAPTER] 成功通过 gcloud cli 自动获取 Google Cloud Access Token');
-        return gcloudToken;
-      }
-    } catch (e) {
-      // 忽略，说明 gcloud cli 不可用或未登录
+    const now = Date.now();
+
+    // 如果有有效的缓存 Token，直接返回
+    if (this.cachedToken && now < this.tokenExpiry) {
+      return this.cachedToken;
     }
 
-    return '';
+    // 如果最近尝试 gcloud 失败，在 5 分钟内不再重复尝试，防止同步阻塞
+    const FAILURE_CACHE_DURATION = 5 * 60 * 1000;
+    if (now - this.lastGcloudFailureTime < FAILURE_CACHE_DURATION) {
+      return '';
+    }
+
+    // 智能开发者回退：尝试通过 gcloud cli 获取 (异步)
+    return new Promise<string>((resolve) => {
+      exec('gcloud auth print-access-token', {
+        timeout: 2000
+      }, (error, stdout) => {
+        if (error) {
+          // 忽略，说明 gcloud cli 不可用或未登录
+          this.lastGcloudFailureTime = Date.now();
+          resolve('');
+        } else {
+          const gcloudToken = stdout.toString().trim();
+          if (gcloudToken) {
+            logger.info('[VERTEX_ADAPTER] 成功通过 gcloud cli 自动获取 Google Cloud Access Token');
+            this.cachedToken = gcloudToken;
+            const TOKEN_CACHE_DURATION = 50 * 60 * 1000; // 缓存 50 分钟
+            this.tokenExpiry = Date.now() + TOKEN_CACHE_DURATION;
+            resolve(gcloudToken);
+          } else {
+            resolve('');
+          }
+        }
+      });
+    });
   }
 
   /**
@@ -79,7 +103,7 @@ export class VertexGeminiAdapter implements IAdapter {
     headers?: Record<string, string>
   ): Promise<AdapterResponse> {
     const requestId = headers?.['x-request-id'] || 'unknown';
-    const { model, token } = this.resolveModelAndToken(payload, headers);
+    const { model, token } = await this.resolveModelAndToken(payload, headers);
 
     let baseUrl = this.provider.api_base_url;
     if (!baseUrl.endsWith('/')) {
@@ -148,7 +172,7 @@ export class VertexGeminiAdapter implements IAdapter {
     headers?: Record<string, string>
   ): Promise<ReadableStream<Uint8Array>> {
     const requestId = headers?.['x-request-id'] || 'unknown';
-    const { model, token } = this.resolveModelAndToken(payload, headers);
+    const { model, token } = await this.resolveModelAndToken(payload, headers);
 
     let baseUrl = this.provider.api_base_url;
     if (!baseUrl.endsWith('/')) {

@@ -37,7 +37,7 @@ export async function* parseSSEStream(
 
         if (rawLine.startsWith('data:')) {
           const dataContent = rawLine.substring(5).trim();
-          
+
           if (dataContent === '[DONE]') {
             logger.debug('[SSE_PARSER] 收到上游 [DONE] 结束标记', requestId);
             break;

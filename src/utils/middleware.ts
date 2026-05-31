@@ -62,7 +62,10 @@ export function errorHandlerMiddleware(): MiddlewareHandler<HonoEnv> {
           let errType = 'api_error';
           if (status === 404) errType = 'not_found_error';
           else if (status === 401 || status === 403) errType = 'authentication_error';
-          
+          else if (status === 429) errType = 'rate_limit_error';
+          else if (status === 503 || status === 529) errType = 'overloaded_error';
+          else if (status === 400) errType = 'invalid_request_error';
+
           c.res = c.json({
             type: 'error',
             error: {
@@ -74,15 +77,41 @@ export function errorHandlerMiddleware(): MiddlewareHandler<HonoEnv> {
       }
     } catch (err: any) {
       logger.error(`[CRITICAL_UNCAUGHT] 未捕获异常: ${err.message}. 堆栈:\n${err.stack}`, requestId);
-      
+
+      let status = 500;
+      let errType = 'api_error';
+      const message = err.message || '';
+
+      // 尝试从错误消息中提取状态码，例如 "Upstream request error (503)" 或 "status 503"
+      const statusMatch = message.match(/\((\d{3})\)/) || message.match(/status\s+(\d{3})/i);
+      if (statusMatch) {
+        const parsedStatus = parseInt(statusMatch[1], 10);
+        const validStatuses = [400, 401, 402, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 416, 422, 429, 500, 501, 502, 503, 504, 507, 529];
+        if (validStatuses.includes(parsedStatus)) {
+          status = parsedStatus;
+        }
+      }
+
+      if (status === 429) {
+        errType = 'rate_limit_error';
+      } else if (status === 503 || status === 529) {
+        errType = 'overloaded_error';
+      } else if (status === 401 || status === 403) {
+        errType = 'authentication_error';
+      } else if (status === 400) {
+        errType = 'invalid_request_error';
+      } else if (status === 404) {
+        errType = 'not_found_error';
+      }
+
       // 捕获所有运行时崩溃并将其转译为符合 Anthropic 协议规范的错误返回，确保 Claude 不崩溃
       c.res = c.json({
         type: 'error',
         error: {
-          type: 'api_error',
+          type: errType,
           message: `Internal Gateway Exception: ${err.message}`
         }
-      }, 500);
+      }, status as any);
     }
   };
 }

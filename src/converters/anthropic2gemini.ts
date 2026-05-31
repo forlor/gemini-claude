@@ -266,6 +266,15 @@ export class AnthropicToGeminiConverter implements IConverter {
     let content: any[] = [];
     let hasToolUse = false;
 
+    // 先扫描获取 thoughtSignature
+    let responseThoughtSignature: string | undefined = undefined;
+    for (const part of parts) {
+      if (part && part.thought === true && part.thoughtSignature) {
+        responseThoughtSignature = part.thoughtSignature;
+        break;
+      }
+    }
+
     for (const part of parts) {
       if (!part || typeof part !== 'object') continue;
 
@@ -279,6 +288,22 @@ export class AnthropicToGeminiConverter implements IConverter {
           block.signature = part.thoughtSignature;
         }
         content.push(block);
+      } else if (part.functionCall) {
+        // 遭遇工具调用：利用双轨制对工具 ID 进行高可靠自编码
+        hasToolUse = true;
+        const fc = part.functionCall;
+        const useFallback = options.providerType === 'vertex-gemini';
+
+        // 还原/自编码
+        const originalId = fc.id || `toolu_${crypto.randomUUID().replace(/-/g, '')}`;
+        const encodedId = encodeToolId(originalId, part.thoughtSignature || responseThoughtSignature, fc.name, useFallback);
+
+        content.push({
+          type: 'tool_use',
+          id: encodedId,
+          name: fc.name,
+          input: fc.args || {}
+        });
       } else if ('text' in part) {
         // 处理常规文本
         let text = part.text || '';
@@ -289,22 +314,6 @@ export class AnthropicToGeminiConverter implements IConverter {
         content.push({
           type: 'text',
           text
-        });
-      } else if (part.functionCall) {
-        // 遭遇工具调用：利用双轨制对工具 ID 进行高可靠自编码
-        hasToolUse = true;
-        const fc = part.functionCall;
-        const useFallback = options.providerType === 'vertex-gemini';
-        
-        // 还原/自编码
-        const originalId = fc.id || `toolu_${crypto.randomUUID().replace(/-/g, '')}`;
-        const encodedId = encodeToolId(originalId, part.thoughtSignature, fc.name, useFallback);
-
-        content.push({
-          type: 'tool_use',
-          id: encodedId,
-          name: fc.name,
-          input: fc.args || {}
         });
       }
     }
@@ -378,6 +387,13 @@ export class AnthropicToGeminiConverter implements IConverter {
         let promptTokens = 0;
         let outputTokens = 0;
         let finishReason = 'STOP';
+        const accumulatedFunctionCalls = new Map<string, {
+          id: string;
+          name: string;
+          args: Record<string, any>;
+          thoughtSignature?: string;
+        }>();
+        let lastActiveToolKey: string | null = null;
 
         function sseEmit(event: string, data: any) {
           const raw = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -517,7 +533,43 @@ export class AnthropicToGeminiConverter implements IConverter {
                 continue;
               }
 
-              // 2. 处理常规文本模块
+              // 2. 处理工具调用模块 (移到 text 之前，并优化 key/signature 机制)
+              if (part.functionCall) {
+                hasToolUse = true;
+                const fc = part.functionCall;
+                const key = fc.id || fc.name || lastActiveToolKey || 'default';
+
+                if (!accumulatedFunctionCalls.has(key)) {
+                  const name = fc.name || (lastActiveToolKey ? accumulatedFunctionCalls.get(lastActiveToolKey)?.name : null) || 'unknown';
+                  accumulatedFunctionCalls.set(key, {
+                    id: fc.id || `toolu_${crypto.randomUUID().replace(/-/g, '')}`,
+                    name: name,
+                    args: {},
+                    thoughtSignature: part.thoughtSignature || currentThinkingSignature || undefined
+                  });
+                }
+
+                const existing = accumulatedFunctionCalls.get(key)!;
+
+                // 持续更新 thoughtSignature
+                if (part.thoughtSignature) {
+                  existing.thoughtSignature = part.thoughtSignature;
+                } else if (currentThinkingSignature && !existing.thoughtSignature) {
+                  existing.thoughtSignature = currentThinkingSignature;
+                }
+
+                if (fc.args) {
+                  existing.args = {
+                    ...existing.args,
+                    ...fc.args
+                  };
+                }
+
+                lastActiveToolKey = key;
+                continue;
+              }
+
+              // 3. 处理常规文本模块
               if ('text' in part) {
                 let text = part.text || '';
                 if (!text) continue;
@@ -545,52 +597,45 @@ export class AnthropicToGeminiConverter implements IConverter {
                 });
                 continue;
               }
-
-              // 3. 处理工具调用模块
-              if (part.functionCall) {
-                closeBlock();
-                hasToolUse = true;
-                
-                const fc = part.functionCall;
-                const originalId = fc.id || `toolu_${crypto.randomUUID().replace(/-/g, '')}`;
-                // 使用自适应双轨制进行编码
-                const encodedId = encodeToolId(originalId, part.thoughtSignature, fc.name, useFallback);
-
-                currentBlockIndex++;
-
-                sseEmit('content_block_start', {
-                  type: 'content_block_start',
-                  index: currentBlockIndex,
-                  content_block: {
-                    type: 'tool_use',
-                    id: encodedId,
-                    name: fc.name,
-                    input: {}
-                  }
-                });
-
-                sseEmit('content_block_delta', {
-                  type: 'content_block_delta',
-                  index: currentBlockIndex,
-                  delta: {
-                    type: 'input_json_delta',
-                    partial_json: JSON.stringify(fc.args || {})
-                  }
-                });
-
-                sseEmit('content_block_stop', {
-                  type: 'content_block_stop',
-                  index: currentBlockIndex
-                });
-                
-                currentBlockType = null; // 工具调用是一个完整关闭块
-                continue;
-              }
             }
           }
 
           // 循环读取结束，关闭最后可能依然处于开启状态的内容块
           closeBlock();
+
+          // 在流结束前，将所有累积并聚合后的工具调用（functionCall）统一发射给客户端
+          if (accumulatedFunctionCalls.size > 0) {
+            for (const fc of accumulatedFunctionCalls.values()) {
+              currentBlockIndex++;
+              // 使用自适应双轨制进行工具 ID 还原/自编码
+              const encodedId = encodeToolId(fc.id, fc.thoughtSignature, fc.name, useFallback);
+              
+              sseEmit('content_block_start', {
+                type: 'content_block_start',
+                index: currentBlockIndex,
+                content_block: {
+                  type: 'tool_use',
+                  id: encodedId,
+                  name: fc.name,
+                  input: {}
+                }
+              });
+
+              sseEmit('content_block_delta', {
+                type: 'content_block_delta',
+                index: currentBlockIndex,
+                delta: {
+                  type: 'input_json_delta',
+                  partial_json: JSON.stringify(fc.args)
+                }
+              });
+
+              sseEmit('content_block_stop', {
+                type: 'content_block_stop',
+                index: currentBlockIndex
+              });
+            }
+          }
 
           // 统一映射流式 stop_reason
           let stop_reason = 'end_turn';
@@ -637,9 +682,10 @@ export class AnthropicToGeminiConverter implements IConverter {
   convertError(error: any): any {
     const status = error.status || 500;
     const message = error.message || 'Unknown upstream gateway error';
-    
+
     let errType = 'api_error';
     if (status === 429) errType = 'rate_limit_error';
+    else if (status === 503 || status === 529) errType = 'overloaded_error';
     else if (status === 400) errType = 'invalid_request_error';
     else if (status === 401 || status === 403) errType = 'authentication_error';
     else if (status === 404) errType = 'not_found_error';
