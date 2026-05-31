@@ -40,7 +40,7 @@ export async function* parseSSEStream(
 
           if (dataContent === '[DONE]') {
             logger.debug('[SSE_PARSER] 收到上游 [DONE] 结束标记', requestId);
-            break;
+            return;
           }
 
           try {

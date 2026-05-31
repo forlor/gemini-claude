@@ -167,20 +167,31 @@ export async function detectAndApplyCaching(
     // 上游标准端点：https://generativelanguage.googleapis.com/v1beta/cachedContents?key=...
     // 或者是：${api_base_url}/v1beta/cachedContents?key=...
     let createUrl = '';
-    if (cleanBaseUrl.includes('v1beta')) {
-      const parts = cleanBaseUrl.split('/v1beta');
-      createUrl = `${parts[0]}/v1beta/cachedContents`;
+    const reqHeaders: Record<string, string> = {
+      'Content-Type': 'application/json'
+    };
+
+    if (cleanBaseUrl.includes('aiplatform.googleapis.com')) {
+      // Vertex AI 专属缓存端点解析
+      // 格式: https://{location}-aiplatform.googleapis.com/{version}/projects/{project}/locations/{location}/publishers/google/models/
+      const parts = cleanBaseUrl.split('/publishers/');
+      createUrl = `${parts[0]}/cachedContents`;
+      reqHeaders['Authorization'] = `Bearer ${apiKey}`;
     } else {
-      createUrl = `${cleanBaseUrl}/cachedContents`;
+      // AI Studio 标准端点
+      if (cleanBaseUrl.includes('v1beta')) {
+        const parts = cleanBaseUrl.split('/v1beta');
+        createUrl = `${parts[0]}/v1beta/cachedContents`;
+      } else {
+        createUrl = `${cleanBaseUrl}/cachedContents`;
+      }
+      reqHeaders['x-goog-api-key'] = apiKey;
     }
 
     const t0 = Date.now();
     const response = await fetch(createUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey
-      },
+      headers: reqHeaders,
       body: JSON.stringify(cacheRequestBody)
     });
 

@@ -81,14 +81,19 @@ export function errorHandlerMiddleware(): MiddlewareHandler<HonoEnv> {
       let status = 500;
       let errType = 'api_error';
       const message = err.message || '';
+      const validStatuses = [400, 401, 402, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 416, 422, 429, 500, 501, 502, 503, 504, 507, 529];
 
-      // 尝试从错误消息中提取状态码，例如 "Upstream request error (503)" 或 "status 503"
-      const statusMatch = message.match(/\((\d{3})\)/) || message.match(/status\s+(\d{3})/i);
-      if (statusMatch) {
-        const parsedStatus = parseInt(statusMatch[1], 10);
-        const validStatuses = [400, 401, 402, 403, 404, 405, 406, 408, 409, 410, 412, 413, 415, 416, 422, 429, 500, 501, 502, 503, 504, 507, 529];
-        if (validStatuses.includes(parsedStatus)) {
-          status = parsedStatus;
+      const rawStatus = err.status || err.statusCode;
+      if (rawStatus && validStatuses.includes(Number(rawStatus))) {
+        status = Number(rawStatus);
+      } else {
+        // 尝试从错误消息中提取状态码，例如 "Upstream request error (503)" 或 "status 503"
+        const statusMatch = message.match(/\((\d{3})\)/) || message.match(/status\s+(\d{3})/i);
+        if (statusMatch) {
+          const parsedStatus = parseInt(statusMatch[1], 10);
+          if (validStatuses.includes(parsedStatus)) {
+            status = parsedStatus;
+          }
         }
       }
 

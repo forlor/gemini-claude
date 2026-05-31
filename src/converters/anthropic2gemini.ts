@@ -498,7 +498,8 @@ export class AnthropicToGeminiConverter implements IConverter {
             }
 
             // 处理 Parts 状态流转
-            for (const part of parts) {
+            for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+              const part = parts[partIndex];
               if (!part || typeof part !== 'object') continue;
 
               // 1. 处理思考模块
@@ -533,17 +534,17 @@ export class AnthropicToGeminiConverter implements IConverter {
                 continue;
               }
 
-              // 2. 处理工具调用模块 (移到 text 之前，并优化 key/signature 机制)
+              // 2. 处理工具调用模块 (移到 text 之前，并使用 partIndex 保证并行工具调用的唯一性)
               if (part.functionCall) {
                 hasToolUse = true;
                 const fc = part.functionCall;
-                const key = fc.id || fc.name || lastActiveToolKey || 'default';
+                // 使用 fc.id 或 name + partIndex 作为唯一 key，防止并行同名工具调用（如多个子 agent）被合并覆盖
+                const key = fc.id || `${fc.name}_${partIndex}`;
 
                 if (!accumulatedFunctionCalls.has(key)) {
-                  const name = fc.name || (lastActiveToolKey ? accumulatedFunctionCalls.get(lastActiveToolKey)?.name : null) || 'unknown';
                   accumulatedFunctionCalls.set(key, {
                     id: fc.id || `toolu_${crypto.randomUUID().replace(/-/g, '')}`,
-                    name: name,
+                    name: fc.name,
                     args: {},
                     thoughtSignature: part.thoughtSignature || currentThinkingSignature || undefined
                   });

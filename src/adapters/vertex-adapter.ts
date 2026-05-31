@@ -10,6 +10,7 @@ export class VertexGeminiAdapter implements IAdapter {
   private cachedToken: string = '';
   private tokenExpiry: number = 0;
   private lastGcloudFailureTime: number = 0;
+  private activeTokenPromise: Promise<string> | null = null;
 
   constructor(provider: ProviderConfig) {
     this.name = provider.name;
@@ -70,11 +71,16 @@ export class VertexGeminiAdapter implements IAdapter {
       return '';
     }
 
+    if (this.activeTokenPromise) {
+      return this.activeTokenPromise;
+    }
+
     // 智能开发者回退：尝试通过 gcloud cli 获取 (异步)
-    return new Promise<string>((resolve) => {
+    this.activeTokenPromise = new Promise<string>((resolve) => {
       exec('gcloud auth print-access-token', {
         timeout: 2000
       }, (error, stdout) => {
+        this.activeTokenPromise = null; // 任务完成后清除 Promise 引用
         if (error) {
           // 忽略，说明 gcloud cli 不可用或未登录
           this.lastGcloudFailureTime = Date.now();
@@ -93,6 +99,8 @@ export class VertexGeminiAdapter implements IAdapter {
         }
       });
     });
+
+    return this.activeTokenPromise;
   }
 
   /**
