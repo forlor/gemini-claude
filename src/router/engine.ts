@@ -197,6 +197,8 @@ export class RouterEngine {
     };
     const convertedPayload = await target.converter.convertRequest(request, target.targetModel, converterOptions);
 
+    const clientSupportsThinking = !!(request.thinking && request.thinking.type === 'enabled');
+
     // 3. 构建请求头
     const activeHeaders: Record<string, string> = {
       ...headers,
@@ -210,11 +212,12 @@ export class RouterEngine {
     try {
       if (isStream) {
         const rawStream = await target.adapter.executeStream(convertedPayload, activeHeaders);
-        
+
         logger.info(`[ROUTER] 通道 [${target.provider.name}] 握手成功，正在转换流式响应`, requestId);
         return target.converter.convertStream(rawStream, target.targetModel, {
           requestId,
-          prefillText: converterOptions.prefillText
+          prefillText: converterOptions.prefillText,
+          clientSupportsThinking
         });
       } else {
         const response = await target.adapter.execute(convertedPayload, activeHeaders);
@@ -223,7 +226,8 @@ export class RouterEngine {
           logger.info(`[ROUTER] 通道 [${target.provider.name}] 请求成功. 状态码: 200`, requestId);
           return await target.converter.convertResponse(response.body, target.targetModel, {
             requestId,
-            prefillText: converterOptions.prefillText
+            prefillText: converterOptions.prefillText,
+            clientSupportsThinking
           });
         } else {
           logger.error(`[ROUTER] 通道 [${target.provider.name}] 请求失败. 状态码: ${response.status}`, requestId);

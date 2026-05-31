@@ -279,6 +279,10 @@ export class AnthropicToGeminiConverter implements IConverter {
       if (!part || typeof part !== 'object') continue;
 
       if (part.thought === true) {
+        if (!options.clientSupportsThinking) {
+          // 客户端不支持 thinking，直接过滤掉，不发射任何内容
+          continue;
+        }
         // 处理思考过程
         const block: any = {
           type: 'thinking',
@@ -504,6 +508,10 @@ export class AnthropicToGeminiConverter implements IConverter {
 
               // 1. 处理思考模块
               if (part.thought === true) {
+                if (!options.clientSupportsThinking) {
+                  // 客户端不支持 thinking，直接过滤掉，不发射任何内容
+                  continue;
+                }
                 const text = part.text || '';
                 const sig = part.thoughtSignature || '';
 
