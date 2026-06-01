@@ -102,10 +102,13 @@ app.post('/v1/messages/count_tokens', authMiddleware, async (c) => {
 });
 
 // 5. 启动 Node HTTP 服务器监听
+const host = process.env.HOST || '0.0.0.0';
 serve({
   fetch: app.fetch,
-  port: config.PORT
+  port: config.PORT,
+  hostname: host
 }, (info) => {
-  logger.info(`[SYSTEM] Gateway 成功启动并开始监听: http://localhost:${info.port}`);
+  const displayHost = info.address === '0.0.0.0' || info.address === '::' ? 'localhost' : info.address;
+  logger.info(`[SYSTEM] Gateway 成功启动并开始监听: http://${displayHost}:${info.port}`);
 });
 export default app;
