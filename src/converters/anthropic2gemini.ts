@@ -48,9 +48,10 @@ export class AnthropicToGeminiConverter implements IConverter {
     // Claude 行为对齐优化：引导 Gemini 模拟原生 Claude 的行为特征（高并发工具调用、极致简练、严格 Markdown 格式）
     systemText += `\n\n[CLAUDE ALIGNMENT INSTRUCTION: To ensure perfect compatibility with the client interface designed for Claude:
 1. **Parallel Tool Use**: You MUST call multiple independent tools in parallel in a single turn whenever possible (e.g., reading multiple files, running multiple searches, or making multiple edits that do not depend on each other), rather than executing them sequentially across multiple turns.
-2. **Conciseness**: Your text responses before calling tools MUST be extremely brief (one short sentence max). Do NOT output verbose or repetitive announcements.
+2. **Conciseness**: Your text responses before calling tools MUST be extremely brief (one short sentence max, or even completely silent/empty if the action is obvious). Do NOT output verbose, repetitive, or step-by-step "I will..." announcements.
 3. **Markdown Formatting**: Always use backticks (\`) to wrap file paths, function names, variable names, and code identifiers (e.g., \`src/api.ts\`, \`getAuthKeyFromHeader\`).
-4. **No Commentary**: Do not explain what the code does or narrate your thought process unless explicitly requested.]`;
+4. **No Commentary**: Do not explain what the code does or narrate your thought process unless explicitly requested.
+5. **End-to-End Execution**: Avoid redundant intermediate checks or step-by-step verification turns (such as running \`git status\` or reading files repeatedly when you already know the state or have just modified them). Combine writing, staging, compiling, and testing into as few turns as possible to minimize terminal clutter and save context window.]`;
 
     if (systemText.trim()) {
       systemInstruction = {
