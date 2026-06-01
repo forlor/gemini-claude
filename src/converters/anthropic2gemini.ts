@@ -539,6 +539,36 @@ export class AnthropicToGeminiConverter implements IConverter {
         let lastActiveToolKey: string | null = null;
         let accumulatedGroundingMetadata: any = null;
 
+        let textBuffer = '';
+        let isBufferingText = true;
+
+        function emitTextDelta(text: string) {
+          if (currentBlockType !== 'text') {
+            closeBlock();
+            currentBlockIndex++;
+            currentBlockType = 'text';
+
+            sseEmit('content_block_start', {
+              type: 'content_block_start',
+              index: currentBlockIndex,
+              content_block: { type: 'text', text: '' }
+            });
+          }
+
+          sseEmit('content_block_delta', {
+            type: 'content_block_delta',
+            index: currentBlockIndex,
+            delta: { type: 'text_delta', text }
+          });
+        }
+
+        function flushTextBuffer() {
+          if (textBuffer) {
+            emitTextDelta(textBuffer);
+            textBuffer = '';
+          }
+        }
+
         function sseEmit(event: string, data: any) {
           const raw = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
           controller.enqueue(textEncoder.encode(raw));
@@ -573,6 +603,7 @@ export class AnthropicToGeminiConverter implements IConverter {
         try {
           // 注入被裁剪的预填内容
           if (prefillText) {
+            isBufferingText = false; // 有预填内容时，直接关闭缓冲，走常规流式传输
             logger.debug('[CONVERTER_STREAM] 开始回填裁剪后的预填文本事件', requestId);
             
             // 确保 message_start 已发出
@@ -689,6 +720,13 @@ export class AnthropicToGeminiConverter implements IConverter {
               // 2. 处理工具调用模块 (移到 text 之前，并使用 seqIndex 保证并行工具调用的唯一性与稳定性)
               if (part.functionCall) {
                 hasToolUse = true;
+
+                // 一旦遭遇工具调用，立刻关闭文本缓冲，且直接丢弃（清空）已缓冲的文本！
+                if (isBufferingText) {
+                  textBuffer = '';
+                  isBufferingText = false;
+                }
+
                 const fc = part.functionCall;
                 
                 // 过滤得到当前 chunk 的所有 functionCallParts，并求得其在 chunk 中的稳定 sequential index
@@ -730,23 +768,16 @@ export class AnthropicToGeminiConverter implements IConverter {
                 let text = part.text || '';
                 if (!text) continue;
 
-                if (currentBlockType !== 'text') {
-                  closeBlock();
-                  currentBlockIndex++;
-                  currentBlockType = 'text';
-
-                  sseEmit('content_block_start', {
-                    type: 'content_block_start',
-                    index: currentBlockIndex,
-                    content_block: { type: 'text', text: '' }
-                  });
+                if (isBufferingText) {
+                  textBuffer += text;
+                  // 如果缓冲的文本长度超过 150 字符，或者包含换行符（通常意味着它是一个实质性的多行回答，而不是简单的单句工具前置声明）
+                  if (textBuffer.length > 150 || textBuffer.includes('\n')) {
+                    isBufferingText = false;
+                    flushTextBuffer();
+                  }
+                } else {
+                  emitTextDelta(text);
                 }
-
-                sseEmit('content_block_delta', {
-                  type: 'content_block_delta',
-                  index: currentBlockIndex,
-                  delta: { type: 'text_delta', text }
-                });
                 continue;
               }
             }
@@ -754,6 +785,11 @@ export class AnthropicToGeminiConverter implements IConverter {
 
           // 循环读取结束，关闭最后可能依然处于开启状态的内容块
           closeBlock();
+
+          // 如果流结束了，依然处于缓冲状态（说明没有发生任何工具调用，且文本较短），将缓冲的文本冲刷发射出去
+          if (isBufferingText && textBuffer) {
+            flushTextBuffer();
+          }
 
           // 如果有累积的联网检索元数据，在流的末尾统一发射检索引用
           if (accumulatedGroundingMetadata) {
