@@ -1,5 +1,5 @@
 import { IAdapter, AdapterResponse } from './types.js';
-import { ProviderConfig } from '../config.js';
+import { ProviderConfig, getConfig } from '../config.js';
 import { logger } from '../utils/logger.js';
 
 export class GeminiAdapter implements IAdapter {
@@ -82,12 +82,19 @@ export class GeminiAdapter implements IAdapter {
     }
 
     const startTime = Date.now();
+    const config = getConfig();
+    const timeoutMs = config.API_TIMEOUT_MS || 600000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: reqHeaders,
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
 
       const responseHeaders: Record<string, string> = {};
       response.headers.forEach((v, k) => {
@@ -95,7 +102,14 @@ export class GeminiAdapter implements IAdapter {
       });
 
       let responseBody: any;
-      const text = await response.text();
+
+      // 安全读取响应体，防止上游挂起导致网关无限期卡死
+      const textPromise = response.text();
+      const bodyTimeoutPromise = new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error('Timeout reading response body')), 15000)
+      );
+      const text = await Promise.race([textPromise, bodyTimeoutPromise]).catch(() => 'Timeout reading response body');
+
       try {
         responseBody = text ? JSON.parse(text) : {};
       } catch (e) {
@@ -110,6 +124,11 @@ export class GeminiAdapter implements IAdapter {
         body: responseBody
       };
     } catch (err: any) {
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        logger.error(`[GEMINI_ADAPTER] 非流式请求超时 (限制: ${timeoutMs}ms)`, requestId);
+        throw new Error(`Upstream request timeout (${timeoutMs}ms)`);
+      }
       logger.error(`[GEMINI_ADAPTER] 非流式请求异常. 错误: ${err.message}`, requestId);
       throw err;
     }
@@ -152,15 +171,26 @@ export class GeminiAdapter implements IAdapter {
     }
 
     const startTime = Date.now();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s 握手超时保护
+
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: reqHeaders,
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
-        const text = await response.text();
+        // 安全读取错误体，防止上游挂起导致网关无限期卡死
+        const textPromise = response.text();
+        const bodyTimeoutPromise = new Promise<string>((_, reject) =>
+          setTimeout(() => reject(new Error('Timeout reading error body')), 5000)
+        );
+        const text = await Promise.race([textPromise, bodyTimeoutPromise]).catch(() => 'Timeout reading error body');
+
         logger.error(`[GEMINI_ADAPTER] 流式请求握手失败. Code: ${response.status}. 详情: ${text}`, requestId);
         throw new Error(`Upstream stream error (${response.status}): ${text}`);
       }
@@ -172,6 +202,11 @@ export class GeminiAdapter implements IAdapter {
       logger.info(`[GEMINI_ADAPTER] 流式连接成功建立. 握手耗时: ${Date.now() - startTime}ms`, requestId);
       return response.body as any;
     } catch (err: any) {
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        logger.error(`[GEMINI_ADAPTER] 流式请求握手超时 (限制: 30000ms)`, requestId);
+        throw new Error('Upstream stream handshake timeout (30000ms)');
+      }
       logger.error(`[GEMINI_ADAPTER] 流式请求异常. 错误: ${err.message}`, requestId);
       throw err;
     }
