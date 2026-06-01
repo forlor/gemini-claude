@@ -241,7 +241,19 @@ export function reorganizeToolMessages(contents: GeminiContent[]): GeminiContent
           usedToolResponseParts.add(matchedResponse);
         }
       } else {
-        logger.warn(`[REORGANIZER] 未能在上下文中找到 tool_use_id 为 '${toolId}' 的工具执行结果!`, 'role-reorganizer');
+        logger.warn(`[REORGANIZER] 未能在上下文中找到 tool_use_id 为 '${toolId}' 的工具执行结果! 正在自动合成虚拟执行结果以防止 Gemini 返回 400 INVALID_ARGUMENT 报错`, 'role-reorganizer');
+        reorganized.push({
+          role: 'user',
+          parts: [{
+            functionResponse: {
+              id: toolId,
+              name: part.functionCall.name,
+              response: {
+                output: 'Error: Tool execution was aborted, cancelled, or interrupted.'
+              }
+            }
+          }]
+        });
       }
 
       i++;

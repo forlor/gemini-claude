@@ -479,6 +479,56 @@ async function runTests() {
 
   console.log('✅ Test 11 Passed: Global Thought Signature Propagation and fallback verified successfully.\n');
 
+  // ==========================================
+  // Test 12: Aborted/Unmatched Tool Call Virtual Response Synthesis
+  // ==========================================
+  console.log('Running Test 12: Aborted/Unmatched Tool Call Virtual Response Synthesis...');
+  
+  const reqWithUnmatchedTool = {
+    model: 'claude-3-7-sonnet',
+    messages: [
+      {
+        role: 'user',
+        content: 'Please search for TypeScript modules'
+      },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: encodeToolId('tool_unmatched', 'sig-abc', 'search_web', false),
+            name: 'search_web',
+            input: { query: 'TypeScript' }
+          }
+        ]
+      },
+      // Note: No matching tool_result is sent because the user aborted/cancelled the previous turn.
+      {
+        role: 'user',
+        content: 'Actually search for Hono instead'
+      }
+    ]
+  };
+
+  const convertedWithUnmatched = await converter.convertRequest(reqWithUnmatchedTool, 'gemini-2.5-pro');
+  
+  // The reorganized messages should have:
+  // 1. User original prompt
+  // 2. Model turn with functionCall (the tool_use)
+  // 3. Automatically synthesized User turn with functionResponse (remedying the missing tool_result)
+  const finalContents = convertedWithUnmatched.contents;
+  assert(finalContents.length === 3, 'Should have exactly 3 content messages (1 user, 1 model, 1 user)');
+  assert(finalContents[0].role === 'user', 'First message must be user');
+  
+  assert(finalContents[1].role === 'model', 'Second message must be model');
+  assert(finalContents[1].parts[0].functionCall !== undefined, 'Second message must contain functionCall');
+  
+  assert(finalContents[2].role === 'user', 'Third message must be user');
+  assert(finalContents[2].parts[0].functionResponse !== undefined, 'Third message must contain synthesized functionResponse');
+  assert(finalContents[2].parts[0].functionResponse.response.output.includes('aborted'), 'Synthesized response should mention abort/cancel');
+  
+  console.log('✅ Test 12 Passed: Aborted/Unmatched tool call virtual responses synthesized successfully.\n');
+
   console.log('🎉 ALL REGRESSION TESTS PASSED SUCCESSFULLY! 100% PROTOCOL COMPLIANT! 🎉');
 }
 
