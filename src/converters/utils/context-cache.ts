@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { logger } from '../../utils/logger.js';
+import { getConfig } from '../../config.js';
 
 interface CacheEntry {
   cachedContentId: string;
@@ -9,6 +10,9 @@ interface CacheEntry {
 
 // 内存中的 HASH -> CachedContentId 缓存映射表
 const cacheRegistry = new Map<string, CacheEntry>();
+
+// 被自动检测探测为免费层级（不支持 Context Caching）的模型集合
+const freeTierModels = new Set<string>();
 
 /**
  * 清理过期的缓存条目，并限制 Map 最大容量为 1000 以防止内存泄漏
@@ -114,15 +118,24 @@ export async function detectAndApplyCaching(
   geminiRequest: any,
   apiKey: string,
   apiBaseUrl: string,
-  requestId: string
+  requestId: string,
+  targetModel: string
 ): Promise<any> {
-  const model = geminiRequest.model || '';
+  const model = targetModel || '';
+  const modelLower = model.toLowerCase();
+
+  // 0. 检查是否显式关闭了缓存，或者当前模型是否在运行时已被自动探测并标记为不支持缓存的 Free Tier 免费层级
+  const config = getConfig();
+  if (config.disable_context_cache || freeTierModels.has(modelLower)) {
+    return geminiRequest;
+  }
+
   const contents = geminiRequest.contents || [];
   const systemInstruction = geminiRequest.systemInstruction;
 
   // 1. Caching 条件前置校验
   // 只有 2.5/3.0 推理及主系列模型支持缓存，且一般只有当对话多于一轮时，对前 N-1 轮进行缓存才具有意义
-  if (!model.includes('gemini') || contents.length < 3) {
+  if (!modelLower.includes('gemini') || contents.length < 3) {
     return geminiRequest;
   }
 
@@ -243,6 +256,12 @@ export async function detectAndApplyCaching(
     } else {
       const errText = await response.text();
       logger.warn(`[CONTEXT_CACHE_WARN] 向上游创建缓存失败 (状态码: ${response.status}): ${errText.substring(0, 300)}`, requestId);
+
+      // 自动检测免费层级：如果状态码是 429 且错误信息表示免费层级超限（limit=0），或者 403 权限拒绝，自动在运行时禁用该模型的缓存以避免多余的网络消耗
+      if (errText.includes('TotalCachedContentStorageTokensPerModelFreeTier') || errText.includes('limit=0') || response.status === 403) {
+        logger.warn(`[CONTEXT_CACHE] 自动检测到当前模型及密钥属于免费层级 (Free Tier - 缓存存储配额为 0)，已在此运行时周期内静默屏蔽 [${modelLower}] 模型的 Context Caching 以避免多余的缓存请求。`, requestId);
+        freeTierModels.add(modelLower);
+      }
     }
   } catch (err: any) {
     // 缓存失败应该完全“降级退路”，不能阻断用户请求！继续使用原始未缓存请求完成服务

@@ -23,7 +23,7 @@ export function convertMultimodalBlock(block: any): any {
     return null;
   }
 
-  let mimeType = source.media_type || '';
+  let mimeType = (source.media_type || '').toLowerCase();
   let data = source.data || '';
 
   // 1. 如果是图片类型但未指定 mimeType，默认指定为 image/png

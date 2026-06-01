@@ -28,6 +28,7 @@ export interface AppConfig {
   Providers: ProviderConfig[];
   Router: RouterConfig;
   CUSTOM_ROUTER_PATH?: string;
+  disable_context_cache?: boolean;
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -162,6 +163,9 @@ export function loadConfig(forceReload = false): AppConfig {
   }
   if (process.env.APIKEY) {
     interpolated.APIKEY = process.env.APIKEY;
+  }
+  if (process.env.DISABLE_CONTEXT_CACHE) {
+    interpolated.disable_context_cache = process.env.DISABLE_CONTEXT_CACHE === 'true';
   }
   if (process.env.LOG_LEVEL) {
     const lvl = process.env.LOG_LEVEL.toLowerCase();

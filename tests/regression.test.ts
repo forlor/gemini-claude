@@ -6,6 +6,7 @@ import { mergeSameRoleMessages, reorganizeToolMessages } from '../src/converters
 import { estimateRequestTokens, estimateTokens } from '../src/utils/token-counter.js';
 import { RouterEngine } from '../src/router/engine.js';
 import { AppConfig } from '../src/config.js';
+import { AnthropicToGeminiConverter } from '../src/converters/anthropic2gemini.js';
 
 // 简单的轻量级单元测试断言框架
 function assert(condition: boolean, message: string) {
@@ -281,6 +282,202 @@ async function runTests() {
   assert(cleanedEmptyProp.required === undefined, 'Required array should be deleted if properties are empty or missing');
 
   console.log('✅ Test 8 Passed: Advanced Protocol & Performance Fixes verified successfully.\n');
+
+  // ==========================================
+  // Test 9: Extended Thinking & Case Normalization
+  // ==========================================
+  console.log('Running Test 9: Extended Thinking & Case Normalization...');
+  const converter = new AnthropicToGeminiConverter();
+
+  // 1. Case-insensitive matching for targetModel
+  const reqWithThinking = {
+    model: 'claude-3-7-sonnet',
+    max_tokens: 1000,
+    thinking: {
+      type: 'enabled',
+      budget_tokens: 2048
+    },
+    messages: [{ role: 'user', content: 'Hello' }]
+  };
+
+  // Gemini-3-Pro (uppercase) should be recognized as a thinking model and use thinkingLevel
+  const resGemini3Pro = await converter.convertRequest(reqWithThinking, 'Gemini-3-Pro');
+  assert(resGemini3Pro.generationConfig.thinkingConfig !== undefined, 'Gemini-3-Pro should be recognized as a thinking model');
+  assert(resGemini3Pro.generationConfig.thinkingConfig.thinkingLevel === 'HIGH', 'Gemini-3-Pro should default to HIGH thinkingLevel');
+  assert(resGemini3Pro.generationConfig.thinkingConfig.thinkingBudget === undefined, 'Gemini-3-Pro should not use thinkingBudget');
+
+  // gemini-3-flash should be recognized as a thinking model (Gemini 3 series Flash supports thinking)
+  const resGemini3Flash = await converter.convertRequest(reqWithThinking, 'gemini-3-flash');
+  assert(resGemini3Flash.generationConfig.thinkingConfig !== undefined, 'gemini-3-flash should be recognized as a thinking model');
+  assert(resGemini3Flash.generationConfig.thinkingConfig.thinkingLevel === 'HIGH', 'gemini-3-flash should default to HIGH thinkingLevel');
+
+  // 2. Client-provided thinking_level normalization
+  const reqWithCustomLevel = {
+    model: 'claude-3-7-sonnet',
+    max_tokens: 1000,
+    thinking: {
+      type: 'enabled',
+      thinking_level: 'minimal' // lowercase
+    },
+    messages: [{ role: 'user', content: 'Hello' }]
+  };
+  const resCustomLevel = await converter.convertRequest(reqWithCustomLevel, 'gemini-3-pro');
+  assert(resCustomLevel.generationConfig.thinkingConfig.thinkingLevel === 'MINIMAL', 'Should normalize lowercase thinking_level to uppercase MINIMAL');
+
+  const reqWithInvalidLevel = {
+    model: 'claude-3-7-sonnet',
+    max_tokens: 1000,
+    thinking: {
+      type: 'enabled',
+      thinkingLevel: 'invalid-level'
+    },
+    messages: [{ role: 'user', content: 'Hello' }]
+  };
+  const resInvalidLevel = await converter.convertRequest(reqWithInvalidLevel, 'gemini-3-pro');
+  assert(resInvalidLevel.generationConfig.thinkingConfig.thinkingLevel === 'HIGH', 'Should fallback invalid thinkingLevel to HIGH');
+
+  // 3. Case-insensitive web search matching
+  const reqNormal = {
+    model: 'claude-3-7-sonnet',
+    messages: [{ role: 'user', content: 'Hello' }]
+  };
+  const resSearch = await converter.convertRequest(reqNormal, 'gemini-2.5-flash-Search');
+  assert(resSearch.tools !== undefined && resSearch.tools.some((t: any) => t.googleSearch !== undefined), 'Should support case-insensitive web search suffix matching');
+
+  console.log('✅ Test 9 Passed: Extended Thinking & Case Normalization verified successfully.\n');
+
+  // ==========================================
+  // Test 10: Tool Use Stop Reason Mapping
+  // ==========================================
+  console.log('Running Test 10: Tool Use Stop Reason Mapping...');
+
+  // Mock Gemini response with a tool call and finishReason !== 'STOP'
+  const mockGeminiResponse = {
+    candidates: [
+      {
+        content: {
+          parts: [
+            {
+              functionCall: {
+                id: 'toolu_123',
+                name: 'get_weather',
+                args: { location: 'San Francisco, CA' }
+              }
+            }
+          ]
+        },
+        finishReason: 'OTHER' // Not 'STOP'
+      }
+    ]
+  };
+
+  const convertedResponse = await converter.convertResponse(mockGeminiResponse, 'gemini-2.5-pro');
+  assert(convertedResponse.stop_reason === 'tool_use', 'Should set stop_reason to tool_use when tool is called, even if finishReason is not STOP');
+
+  console.log('✅ Test 10 Passed: Tool Use Stop Reason Mapping verified successfully.\n');
+
+  // ==========================================
+  // Test 11: Global Thought Signature Propagation and Fallback
+  // ==========================================
+  console.log('Running Test 11: Global Thought Signature Propagation...');
+  
+  // Case A: Real signature found in one model message, should propagate to all model parts without signature
+  const reqWithSig = {
+    model: 'claude-3-7-sonnet',
+    messages: [
+      {
+        role: 'user',
+        content: 'Run tools'
+      },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: encodeToolId('tool_1', 'my-real-sig-123', 'tool_name_1', false),
+            name: 'tool_name_1',
+            input: {}
+          }
+        ]
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: encodeToolId('tool_1', 'my-real-sig-123', 'tool_name_1', false),
+            content: 'result 1'
+          }
+        ]
+      },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: encodeToolId('tool_2', undefined, 'tool_name_2', false),
+            name: 'tool_name_2',
+            input: {}
+          }
+        ]
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: encodeToolId('tool_2', undefined, 'tool_name_2', false),
+            content: 'result 2'
+          }
+        ]
+      }
+    ]
+  };
+
+  const convertedWithSig = await converter.convertRequest(reqWithSig, 'gemini-2.5-pro');
+  const modelPartsWithSig = convertedWithSig.contents.filter((c: any) => c.role === 'model').flatMap((c: any) => c.parts);
+  assert(modelPartsWithSig.length === 2, 'Should have 2 model parts');
+  assert(modelPartsWithSig[0].thoughtSignature === 'my-real-sig-123', 'First part should have the real signature');
+  assert(modelPartsWithSig[1].thoughtSignature === 'my-real-sig-123', 'Second part should have propagated the real signature');
+
+  // Case B: No real signature found, should fallback to 'skip_thought_signature_validator'
+  const reqWithoutSig = {
+    model: 'claude-3-7-sonnet',
+    messages: [
+      {
+        role: 'user',
+        content: 'Run tools'
+      },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: encodeToolId('tool_1', undefined, 'tool_name_1', false),
+            name: 'tool_name_1',
+            input: {}
+          }
+        ]
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: encodeToolId('tool_1', undefined, 'tool_name_1', false),
+            content: 'result 1'
+          }
+        ]
+      }
+    ]
+  };
+
+  const convertedWithoutSig = await converter.convertRequest(reqWithoutSig, 'gemini-2.5-pro');
+  const modelPartsWithoutSig = convertedWithoutSig.contents.filter((c: any) => c.role === 'model').flatMap((c: any) => c.parts);
+  assert(modelPartsWithoutSig.length === 1, 'Should have 1 model part');
+  assert(modelPartsWithoutSig[0].thoughtSignature === 'skip_thought_signature_validator', 'Should fallback to skip_thought_signature_validator');
+
+  console.log('✅ Test 11 Passed: Global Thought Signature Propagation and fallback verified successfully.\n');
 
   console.log('🎉 ALL REGRESSION TESTS PASSED SUCCESSFULLY! 100% PROTOCOL COMPLIANT! 🎉');
 }

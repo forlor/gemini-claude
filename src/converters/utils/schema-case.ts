@@ -76,15 +76,27 @@ export function cleanAndCaseJsonSchema(schema: any, typeCasing: 'uppercase' | 'l
 
     if (Array.isArray(unionItems) && unionItems.length > 0) {
       // 检查联合类型中是否包含 null 类型
-      const hasNullInUnion = unionItems.some(item => item && (item.type === 'null' || (Array.isArray(item.type) && item.type.includes('null'))));
+      const hasNullInUnion = unionItems.some(item => {
+        if (!item) return false;
+        if (typeof item.type === 'string') {
+          return item.type.toLowerCase() === 'null';
+        }
+        if (Array.isArray(item.type)) {
+          return item.type.some((t: any) => typeof t === 'string' && t.toLowerCase() === 'null');
+        }
+        return false;
+      });
       if (hasNullInUnion) {
         result.nullable = true;
         validations.push('nullable: true');
       }
 
       // 查找并保留第一个带有 properties 或复杂类型的分支
-      const preferred = unionItems.find(item => item && (item.type === 'object' || item.type === 'array' || item.properties || item.items))
-        || unionItems.find(item => item && item.type);
+      const preferred = unionItems.find(item => {
+        if (!item) return false;
+        const t = typeof item.type === 'string' ? item.type.toLowerCase() : '';
+        return t === 'object' || t === 'array' || item.properties || item.items;
+      }) || unionItems.find(item => item && item.type);
 
       if (preferred) {
         // 递归清洗选中的分支

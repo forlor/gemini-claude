@@ -122,8 +122,8 @@ export function mergeSameRoleMessages(contents: GeminiContent[]): GeminiContent[
       // 角色相同，合并 Parts
       for (const part of cleanedParts) {
         const lastPart = lastMerged.parts[lastMerged.parts.length - 1];
-        if (lastPart && 'text' in lastPart && 'text' in part) {
-          // 如果连续两个 part 都是文本，合并为一个文本块，避免冗余
+        if (lastPart && 'text' in lastPart && 'text' in part && (!!lastPart.thought === !!part.thought)) {
+          // 如果连续两个 part 都是相同属性的文本/思考块，合并为一个，避免冗余
           lastPart.text = (lastPart.text || '') + '\n' + (part.text || '');
         } else {
           lastMerged.parts.push(part);
@@ -134,7 +134,7 @@ export function mergeSameRoleMessages(contents: GeminiContent[]): GeminiContent[
       const finalParts: GeminiPart[] = [];
       for (const part of cleanedParts) {
         const lastPart = finalParts[finalParts.length - 1];
-        if (lastPart && 'text' in lastPart && 'text' in part) {
+        if (lastPart && 'text' in lastPart && 'text' in part && (!!lastPart.thought === !!part.thought)) {
           lastPart.text = (lastPart.text || '') + '\n' + (part.text || '');
         } else {
           finalParts.push(part);
@@ -171,13 +171,17 @@ export function reorganizeToolMessages(contents: GeminiContent[]): GeminiContent
   }
 
   // 1. 首先提取所有的 functionResponse，并以工具 ID (id) 为 Key 存储，用于后续快速定位和匹配
-  const toolResults: Record<string, GeminiPart> = {};
+  const toolResults: Record<string, GeminiPart[]> = {};
   for (const content of contents) {
     for (const part of content.parts) {
       if (part && part.functionResponse) {
         const toolId = part.functionResponse.id;
         if (toolId) {
-          toolResults[String(toolId)] = part;
+          const idStr = String(toolId);
+          if (!toolResults[idStr]) {
+            toolResults[idStr] = [];
+          }
+          toolResults[idStr].push(part);
         }
       }
     }
@@ -228,12 +232,14 @@ export function reorganizeToolMessages(contents: GeminiContent[]): GeminiContent
 
       // 紧接着寻找并写入对应的 functionResponse (user 角色)
       if (toolId !== undefined && toolId !== null && toolResults[String(toolId)]) {
-        const matchedResponse = toolResults[String(toolId)];
-        reorganized.push({
-          role: 'user',
-          parts: [matchedResponse]
-        });
-        usedToolResponseParts.add(matchedResponse);
+        const matchedResponses = toolResults[String(toolId)];
+        for (const matchedResponse of matchedResponses) {
+          reorganized.push({
+            role: 'user',
+            parts: [matchedResponse]
+          });
+          usedToolResponseParts.add(matchedResponse);
+        }
       } else {
         logger.warn(`[REORGANIZER] 未能在上下文中找到 tool_use_id 为 '${toolId}' 的工具执行结果!`, 'role-reorganizer');
       }

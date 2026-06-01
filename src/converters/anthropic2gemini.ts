@@ -22,12 +22,13 @@ export class AnthropicToGeminiConverter implements IConverter {
     options: Record<string, any> = {}
   ): Promise<any> {
     const requestId = options.requestId || 'unknown';
+    const modelLower = targetModel.toLowerCase();
     logger.debug(`[CONVERTER] 开始转换请求. 目标模型: ${targetModel}`, requestId);
 
     // 1. 提取并清理 System Prompt
     let systemInstruction: any = undefined;
+    let systemText = '';
     if (request.system) {
-      let systemText = '';
       if (typeof request.system === 'string') {
         systemText = request.system;
       } else if (Array.isArray(request.system)) {
@@ -36,18 +37,25 @@ export class AnthropicToGeminiConverter implements IConverter {
           .map((block: any) => (typeof block === 'string' ? block : block.text || ''))
           .join('\n');
       }
+    }
 
-      if (systemText.trim()) {
-        // 计划模式提示词对齐优化：自动探测并强力约束 Gemini 在计划模式下的输出行为，防止其将计划泄露到主界面
-        const isPlanMode = systemText.includes('ExitPlanMode') || systemText.includes('plan file');
-        if (isPlanMode) {
-          systemText += `\n\n[CRITICAL INSTRUCTION FOR PLAN MODE: You are currently in PLAN MODE. You MUST write the detailed plan ONLY to the specified plan file using the Write/Edit tool. Do NOT print the detailed plan, code blocks, or sections in your text response to the user. Your text response MUST be extremely brief (1-2 sentences max), simply stating that you have written the plan to the file. This is a strict constraint to avoid UI clutter.]`;
-        }
+    // 计划模式提示词对齐优化：自动探测并强力约束 Gemini 在计划模式下的输出行为，防止其将计划泄露到主界面
+    const isPlanMode = systemText.includes('ExitPlanMode') || systemText.includes('plan file');
+    if (isPlanMode) {
+      systemText += `\n\n[CRITICAL INSTRUCTION FOR PLAN MODE: You are currently in PLAN MODE. You MUST write the detailed plan ONLY to the specified plan file using the Write/Edit tool. Do NOT print the detailed plan, code blocks, or sections in your text response to the user. Your text response MUST be extremely brief (1-2 sentences max), simply stating that you have written the plan to the file. This is a strict constraint to avoid UI clutter.]`;
+    }
 
-        systemInstruction = {
-          parts: [{ text: systemText }]
-        };
-      }
+    // Claude 行为对齐优化：引导 Gemini 模拟原生 Claude 的行为特征（高并发工具调用、极致简练、严格 Markdown 格式）
+    systemText += `\n\n[CLAUDE ALIGNMENT INSTRUCTION: To ensure perfect compatibility with the client interface designed for Claude:
+1. **Parallel Tool Use**: You MUST call multiple independent tools in parallel in a single turn whenever possible (e.g., reading multiple files, running multiple searches, or making multiple edits that do not depend on each other), rather than executing them sequentially across multiple turns.
+2. **Conciseness**: Your text responses before calling tools MUST be extremely brief (one short sentence max). Do NOT output verbose or repetitive announcements.
+3. **Markdown Formatting**: Always use backticks (\`) to wrap file paths, function names, variable names, and code identifiers (e.g., \`src/api.ts\`, \`getAuthKeyFromHeader\`).
+4. **No Commentary**: Do not explain what the code does or narrate your thought process unless explicitly requested.]`;
+
+    if (systemText.trim()) {
+      systemInstruction = {
+        parts: [{ text: systemText.trim() }]
+      };
     }
 
     // 2. 预填裁剪支持（Tail Truncation）
@@ -112,9 +120,7 @@ export class AnthropicToGeminiConverter implements IConverter {
               }
             };
 
-            if (signature) {
-              part.thoughtSignature = signature;
-            }
+            part.thoughtSignature = signature || 'skip_thought_signature_validator';
 
             parts.push(part);
           } else if (block.type === 'tool_result') {
@@ -196,6 +202,52 @@ export class AnthropicToGeminiConverter implements IConverter {
     const mergedContents = mergeSameRoleMessages(contents);
     const alignedContents = reorganizeToolMessages(mergedContents);
 
+    // 4.5. 全局自愈检查：优先寻找可用的真实 thoughtSignature，确保每一个 model 消息里的所有 functionCall 都补全签名，防止缺失签名引发 400 INVALID_ARGUMENT
+    // 1. 全局扫描整个 alignedContents 获取所有有效的 thoughtSignature (排除 skip_thought_signature_validator 占位符)
+    let globalActiveSignature: string | undefined = undefined;
+    for (const content of alignedContents) {
+      if (content.role === 'model') {
+        for (const part of content.parts) {
+          if (part.thoughtSignature && part.thoughtSignature !== 'skip_thought_signature_validator') {
+            globalActiveSignature = part.thoughtSignature;
+          } else if (part.thought === true && (part as any).thoughtSignature && (part as any).thoughtSignature !== 'skip_thought_signature_validator') {
+            globalActiveSignature = (part as any).thoughtSignature;
+          }
+        }
+      }
+    }
+
+    // 2. 如果全局没有找到任何真实的 thoughtSignature，使用官方虚拟签名占位符
+    const finalSignature = globalActiveSignature || 'skip_thought_signature_validator';
+
+    // 3. 为所有 model 消息里的 functionCall 补全签名
+    for (const content of alignedContents) {
+      if (content.role === 'model') {
+        // 先尝试在当前 model 消息内部寻找局部的真实 signature，以防存在不同的 signature
+        let localSignature: string | undefined = undefined;
+        for (const part of content.parts) {
+          if (part.thoughtSignature && part.thoughtSignature !== 'skip_thought_signature_validator') {
+            localSignature = part.thoughtSignature;
+            break;
+          } else if (part.thought === true && (part as any).thoughtSignature && (part as any).thoughtSignature !== 'skip_thought_signature_validator') {
+            localSignature = (part as any).thoughtSignature;
+            break;
+          }
+        }
+
+        // 决定当前 model 消息使用的签名：优先使用局部的，否则使用全局可用的（真实或占位符）
+        const sigToUse = localSignature || finalSignature;
+
+        for (const part of content.parts) {
+          if (part.functionCall) {
+            if (!part.thoughtSignature || part.thoughtSignature === 'skip_thought_signature_validator') {
+              part.thoughtSignature = sigToUse;
+            }
+          }
+        }
+      }
+    }
+
     // 5. 转换工具声明并递归净化（JSON Schema Sanitizer）
     let tools: any = undefined;
     if (Array.isArray(request.tools) && request.tools.length > 0) {
@@ -226,7 +278,7 @@ export class AnthropicToGeminiConverter implements IConverter {
     }
 
     // 6. 联网检索（Web Search）自动注入
-    if (targetModel.endsWith('-search') || options.enableWebSearch) {
+    if (modelLower.endsWith('-search') || options.enableWebSearch) {
       tools = injectWebSearchTool(tools);
     }
 
@@ -267,26 +319,36 @@ export class AnthropicToGeminiConverter implements IConverter {
     }
 
     // 9. 智能思考深度匹配（Extended Thinking）
-    const isThinkingModel = targetModel.includes('pro') || targetModel.includes('think') || options.isThinkingModel;
+    const isThinkingModel = modelLower.includes('pro') || modelLower.includes('think') || modelLower.includes('gemini-3') || options.isThinkingModel;
     if (isThinkingModel) {
       const thinkingType = request.thinking?.type;
       const budget = request.thinking?.budget_tokens;
 
       if (thinkingType === 'disabled') {
-        // 1. 客户端显式设置了关闭：显式注入 thinkingBudget: 0，强制上游关闭思考
-        generationConfig.thinkingConfig = {
-          thinkingBudget: 0
-        };
+        // 客户端显式设置了关闭
+        if (modelLower.includes('gemini-3')) {
+          // Gemini 3 系列不支持直接关闭，设置为最小思考等级 (MINIMAL)
+          generationConfig.thinkingConfig = {
+            thinkingLevel: 'MINIMAL'
+          };
+        } else {
+          // Gemini 2.5 系列通过 thinkingBudget: 0 关闭
+          generationConfig.thinkingConfig = {
+            thinkingBudget: 0
+          };
+        }
       } else {
-        // 2. 客户端显式开启，或者“没有显式设置关闭”（即没传或没有相关设置）：默认开启思考，且默认思考等级为 HIGH
-        const thinkingConfig: Record<string, any> = {
-          thinkingBudget: budget || 16000
-        };
+        // 客户端显式开启，或者“没有显式设置关闭”（即默认开启思考）
+        const thinkingConfig: Record<string, any> = {};
 
-        // 如果是 Gemini 3 系列模型，支持并默认设置 thinkingLevel 为 HIGH
-        if (targetModel.includes('gemini-3')) {
-          const clientLevel = request.thinking?.thinking_level || request.thinking?.thinkingLevel;
-          thinkingConfig.thinkingLevel = clientLevel || 'HIGH';
+        // 如果是 Gemini 3 系列模型，仅设置 thinkingLevel
+        if (modelLower.includes('gemini-3')) {
+          const rawLevel = request.thinking?.thinking_level || request.thinking?.thinkingLevel;
+          const clientLevel = typeof rawLevel === 'string' ? rawLevel.toUpperCase() : undefined;
+          thinkingConfig.thinkingLevel = (clientLevel === 'HIGH' || clientLevel === 'MEDIUM' || clientLevel === 'MINIMAL') ? clientLevel : 'HIGH';
+        } else {
+          // Gemini 2.5 系列模型仅使用 thinkingBudget
+          thinkingConfig.thinkingBudget = budget || 16000;
         }
 
         generationConfig.thinkingConfig = thinkingConfig;
@@ -312,7 +374,8 @@ export class AnthropicToGeminiConverter implements IConverter {
         geminiRequest,
         options.apiKey,
         options.apiBaseUrl,
-        requestId
+        requestId,
+        targetModel
       );
     }
 
@@ -404,7 +467,7 @@ export class AnthropicToGeminiConverter implements IConverter {
 
     // 映射 stop_reason
     let stop_reason = 'end_turn';
-    if (hasToolUse && finishReason === 'STOP') {
+    if (hasToolUse) {
       stop_reason = 'tool_use';
     } else if (finishReason === 'MAX_TOKENS') {
       stop_reason = 'max_tokens';
@@ -473,6 +536,7 @@ export class AnthropicToGeminiConverter implements IConverter {
           thoughtSignature?: string;
         }>();
         let lastActiveToolKey: string | null = null;
+        let accumulatedGroundingMetadata: any = null;
 
         function sseEmit(event: string, data: any) {
           const raw = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -554,6 +618,10 @@ export class AnthropicToGeminiConverter implements IConverter {
               if (usage.cachedContentTokenCount !== undefined) cachedTokens = usage.cachedContentTokenCount;
             }
 
+            if (chunk.groundingMetadata) {
+              accumulatedGroundingMetadata = chunk.groundingMetadata;
+            }
+
             if (candidate.finishReason) {
               finishReason = candidate.finishReason;
             }
@@ -617,12 +685,15 @@ export class AnthropicToGeminiConverter implements IConverter {
                 continue;
               }
 
-              // 2. 处理工具调用模块 (移到 text 之前，并使用 partIndex 保证并行工具调用的唯一性)
+              // 2. 处理工具调用模块 (移到 text 之前，并使用 seqIndex 保证并行工具调用的唯一性与稳定性)
               if (part.functionCall) {
                 hasToolUse = true;
                 const fc = part.functionCall;
-                // 使用 fc.id 或 name + partIndex 作为唯一 key，防止并行同名工具调用（如多个子 agent）被合并覆盖
-                const key = fc.id || `${fc.name}_${partIndex}`;
+                
+                // 过滤得到当前 chunk 的所有 functionCallParts，并求得其在 chunk 中的稳定 sequential index
+                const functionCallParts = parts.filter((p: any) => p && p.functionCall);
+                const seqIndex = functionCallParts.indexOf(part);
+                const key = fc.id || `${fc.name}_${seqIndex}`;
 
                 if (!accumulatedFunctionCalls.has(key)) {
                   accumulatedFunctionCalls.set(key, {
@@ -658,10 +729,6 @@ export class AnthropicToGeminiConverter implements IConverter {
                 let text = part.text || '';
                 if (!text) continue;
 
-                if (chunk.groundingMetadata) {
-                  text = appendSearchCitations(text, chunk.groundingMetadata);
-                }
-
                 if (currentBlockType !== 'text') {
                   closeBlock();
                   currentBlockIndex++;
@@ -686,6 +753,28 @@ export class AnthropicToGeminiConverter implements IConverter {
 
           // 循环读取结束，关闭最后可能依然处于开启状态的内容块
           closeBlock();
+
+          // 如果有累积的联网检索元数据，在流的末尾统一发射检索引用
+          if (accumulatedGroundingMetadata) {
+            const citationText = appendSearchCitations('', accumulatedGroundingMetadata);
+            if (citationText) {
+              currentBlockIndex++;
+              sseEmit('content_block_start', {
+                type: 'content_block_start',
+                index: currentBlockIndex,
+                content_block: { type: 'text', text: '' }
+              });
+              sseEmit('content_block_delta', {
+                type: 'content_block_delta',
+                index: currentBlockIndex,
+                delta: { type: 'text_delta', text: citationText }
+              });
+              sseEmit('content_block_stop', {
+                type: 'content_block_stop',
+                index: currentBlockIndex
+              });
+            }
+          }
 
           // 在流结束前，将所有累积并聚合后的工具调用（functionCall）统一发射给客户端
           if (accumulatedFunctionCalls.size > 0) {
@@ -723,7 +812,7 @@ export class AnthropicToGeminiConverter implements IConverter {
 
           // 统一映射流式 stop_reason
           let stop_reason = 'end_turn';
-          if (hasToolUse && finishReason === 'STOP') {
+          if (hasToolUse) {
             stop_reason = 'tool_use';
           } else if (finishReason === 'MAX_TOKENS') {
             stop_reason = 'max_tokens';

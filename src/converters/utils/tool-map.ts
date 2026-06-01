@@ -58,14 +58,16 @@ export function encodeToolId(
  * @param encodedId 客户端传回的工具 ID
  * @returns 解码结果对象
  */
-export function decodeToolId(encodedId: string): { originalId: string; signature?: string; name?: string } {
-  if (!encodedId) {
-    return { originalId: encodedId };
+export function decodeToolId(encodedId: any): { originalId: string; signature?: string; name?: string } {
+  if (encodedId === undefined || encodedId === null) {
+    return { originalId: '' };
   }
 
+  const idStr = String(encodedId);
+
   // 1. 优先检测是否属于 In-Memory Fallback 轨道的 ID
-  if (fallbackMap.has(encodedId)) {
-    const entry = fallbackMap.get(encodedId)!;
+  if (fallbackMap.has(idStr)) {
+    const entry = fallbackMap.get(idStr)!;
     return {
       originalId: entry.originalId,
       signature: entry.signature,
@@ -74,13 +76,13 @@ export function decodeToolId(encodedId: string): { originalId: string; signature
   }
 
   // 2. 属于 Inline 轨道，进行正则/字符串解析
-  let originalId = encodedId;
+  let originalId = idStr;
   let signature: string | undefined;
   let name: string | undefined;
 
   // 解析 Name
-  if (encodedId.includes(SEPARATOR_NAME)) {
-    const parts = encodedId.split(SEPARATOR_NAME, 2);
+  if (idStr.includes(SEPARATOR_NAME)) {
+    const parts = idStr.split(SEPARATOR_NAME, 2);
     originalId = parts[0];
     name = parts[1];
   }
