@@ -414,18 +414,45 @@ export class AnthropicToGeminiConverter implements IConverter {
       }
     }
 
+    let isInsideThinkingTag = false;
     for (const part of parts) {
       if (!part || typeof part !== 'object') continue;
 
+      // 如果之前在 <thinking> 标签中，现在收到了非 thought 内容，先闭合标签
+      if (isInsideThinkingTag && part.thought !== true) {
+        isInsideThinkingTag = false;
+        const lastBlock = content[content.length - 1];
+        if (lastBlock && lastBlock.type === 'text') {
+          lastBlock.text += '\n</thinking>\n\n';
+        }
+      }
+
       if (part.thought === true) {
+        const text = part.text || '';
         if (!options.clientSupportsThinking) {
-          // 客户端不支持 thinking，直接过滤掉，不发射任何内容
+          // 客户端不支持 thinking：将思维链转译为常规文本包裹在 <thinking> 中
+          if (text) {
+            if (!isInsideThinkingTag) {
+              isInsideThinkingTag = true;
+              content.push({
+                type: 'text',
+                text: '<thinking>\n' + text
+              });
+            } else {
+              const lastBlock = content[content.length - 1];
+              if (lastBlock && lastBlock.type === 'text') {
+                lastBlock.text += text;
+              } else {
+                content.push({ type: 'text', text });
+              }
+            }
+          }
           continue;
         }
         // 处理思考过程
         const block: any = {
           type: 'thinking',
-          thinking: part.text || ''
+          thinking: text
         };
         if (part.thoughtSignature) {
           block.signature = part.thoughtSignature;
@@ -458,6 +485,14 @@ export class AnthropicToGeminiConverter implements IConverter {
           type: 'text',
           text
         });
+      }
+    }
+
+    // 扫尾闭合
+    if (isInsideThinkingTag) {
+      const lastBlock = content[content.length - 1];
+      if (lastBlock && lastBlock.type === 'text') {
+        lastBlock.text += '\n</thinking>\n\n';
       }
     }
 
@@ -541,6 +576,7 @@ export class AnthropicToGeminiConverter implements IConverter {
 
         let textBuffer = '';
         let isBufferingText = true;
+        let isInsideThinkingTag = false;
 
         function emitTextDelta(text: string) {
           if (currentBlockType !== 'text') {
@@ -681,14 +717,48 @@ export class AnthropicToGeminiConverter implements IConverter {
               const part = parts[partIndex];
               if (!part || typeof part !== 'object') continue;
 
+              // 如果之前在 <thinking> 标签中，现在收到了非 thought 内容，先闭合标签
+              if (isInsideThinkingTag && part.thought !== true) {
+                isInsideThinkingTag = false;
+                if (currentBlockType === 'text') {
+                  sseEmit('content_block_delta', {
+                    type: 'content_block_delta',
+                    index: currentBlockIndex,
+                    delta: { type: 'text_delta', text: '\n</thinking>\n\n' }
+                  });
+                }
+              }
+
               // 1. 处理思考模块
               if (part.thought === true) {
-                if (!options.clientSupportsThinking) {
-                  // 客户端不支持 thinking，直接过滤掉，不发射任何内容
-                  continue;
-                }
                 const text = part.text || '';
                 const sig = part.thoughtSignature || '';
+
+                if (!options.clientSupportsThinking) {
+                  // 客户端不支持 thinking：将思维链转译为常规文本（包裹在 <thinking> 标签中）流式发射给客户端！
+                  if (text) {
+                    if (!isInsideThinkingTag) {
+                      isInsideThinkingTag = true;
+                      // 开启一个新的 text block 并写入 <thinking>\n
+                      closeBlock();
+                      currentBlockIndex++;
+                      currentBlockType = 'text';
+                      sseEmit('content_block_start', {
+                        type: 'content_block_start',
+                        index: currentBlockIndex,
+                        content_block: { type: 'text', text: '<thinking>\n' + text }
+                      });
+                    } else {
+                      // 已经在 text block 中，直接追加 text_delta
+                      sseEmit('content_block_delta', {
+                        type: 'content_block_delta',
+                        index: currentBlockIndex,
+                        delta: { type: 'text_delta', text }
+                      });
+                    }
+                  }
+                  continue;
+                }
 
                 // 如果状态不同或者签名发生了变化，强行关闭当前块，开启新的 thinking 块
                 if (currentBlockType !== 'thinking' || (sig && sig !== currentThinkingSignature)) {
@@ -780,6 +850,18 @@ export class AnthropicToGeminiConverter implements IConverter {
                 }
                 continue;
               }
+            }
+          }
+
+          // 如果流结束了，依然处于 <thinking> 状态中，先闭合标签
+          if (isInsideThinkingTag) {
+            isInsideThinkingTag = false;
+            if (currentBlockType === 'text') {
+              sseEmit('content_block_delta', {
+                type: 'content_block_delta',
+                index: currentBlockIndex,
+                delta: { type: 'text_delta', text: '\n</thinking>\n\n' }
+              });
             }
           }
 
