@@ -8,9 +8,13 @@ import { logger } from './logger.js';
  */
 export async function* parseSSEStream(
   stream: ReadableStream<Uint8Array>,
-  requestId: string
+  requestId: string,
+  readerRef?: { current: any }
 ): AsyncGenerator<any> {
   const reader = stream.getReader();
+  if (readerRef) {
+    readerRef.current = reader;
+  }
   const decoder = new TextDecoder('utf-8', { fatal: false });
   let buffer = '';
 

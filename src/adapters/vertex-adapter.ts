@@ -165,7 +165,13 @@ export class VertexGeminiAdapter implements IAdapter {
       const bodyTimeoutPromise = new Promise<string>((_, reject) =>
         setTimeout(() => reject(new Error('Timeout reading response body')), 15000)
       );
-      const text = await Promise.race([textPromise, bodyTimeoutPromise]).catch(() => 'Timeout reading response body');
+      let text: string;
+      try {
+        text = await Promise.race([textPromise, bodyTimeoutPromise]);
+      } catch (err: any) {
+        controller.abort();
+        text = 'Timeout reading response body';
+      }
 
       try {
         responseBody = text ? JSON.parse(text) : {};
@@ -246,7 +252,13 @@ export class VertexGeminiAdapter implements IAdapter {
         const bodyTimeoutPromise = new Promise<string>((_, reject) =>
           setTimeout(() => reject(new Error('Timeout reading error body')), 5000)
         );
-        const text = await Promise.race([textPromise, bodyTimeoutPromise]).catch(() => 'Timeout reading error body');
+        let text: string;
+        try {
+          text = await Promise.race([textPromise, bodyTimeoutPromise]);
+        } catch (err: any) {
+          controller.abort();
+          text = 'Timeout reading error body';
+        }
 
         logger.error(`[VERTEX_ADAPTER] 流式请求握手失败. Code: ${response.status}. 详情: ${text}`, requestId);
         throw new Error(`Upstream Vertex stream error (${response.status}): ${text}`);

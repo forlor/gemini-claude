@@ -7,6 +7,7 @@ import { estimateRequestTokens, estimateTokens } from '../src/utils/token-counte
 import { RouterEngine } from '../src/router/engine.js';
 import { AppConfig } from '../src/config.js';
 import { AnthropicToGeminiConverter } from '../src/converters/anthropic2gemini.js';
+import { GeminiAdapter } from '../src/adapters/gemini-adapter.js';
 
 // 简单的轻量级单元测试断言框架
 function assert(condition: boolean, message: string) {
@@ -528,6 +529,154 @@ async function runTests() {
   assert(finalContents[2].parts[0].functionResponse.response.output.includes('aborted'), 'Synthesized response should mention abort/cancel');
   
   console.log('✅ Test 12 Passed: Aborted/Unmatched tool call virtual responses synthesized successfully.\n');
+
+  // ==========================================
+  // Test 13: Connection Leaks on Timeout Rejection
+  // ==========================================
+  console.log('Running Test 13: Connection Leaks on Timeout Rejection...');
+  
+  const originalFetch = (global as any).fetch;
+  let abortCalled = false;
+  const originalAbort = AbortController.prototype.abort;
+  
+  AbortController.prototype.abort = function() {
+    abortCalled = true;
+    originalAbort.apply(this);
+  };
+
+  try {
+    (global as any).fetch = async () => {
+      return {
+        status: 200,
+        headers: new Map(),
+        text: () => new Promise<string>(() => {
+          // Keep response.text() body timeout pending
+        })
+      };
+    };
+
+    const mockProvider = {
+      name: 'gemini-test',
+      type: 'gemini' as const,
+      api_base_url: 'http://mock-api/',
+      models: ['gemini-2.5-pro']
+    };
+    
+    const originalSetTimeout = global.setTimeout;
+    (global as any).setTimeout = (callback: any, delay: number, ...args: any[]) => {
+      if (delay === 15000) {
+        return originalSetTimeout(callback, 10, ...args); // Accelerate 15s to 10ms
+      }
+      return originalSetTimeout(callback, delay, ...args);
+    };
+
+    const adapter = new GeminiAdapter(mockProvider);
+    await adapter.execute({ prompt: 'test' });
+    
+    assert(abortCalled === true, 'AbortController.abort() should have been called on response body read timeout');
+    
+    (global as any).setTimeout = originalSetTimeout;
+  } finally {
+    (global as any).fetch = originalFetch;
+    AbortController.prototype.abort = originalAbort;
+  }
+  console.log('✅ Test 13 Passed: Connection leaks resolved by aborting fetch on body read timeout.\n');
+
+  // ==========================================
+  // Test 14: Upstream Stream Leaks on Internal Failure
+  // ==========================================
+  console.log('Running Test 14: Upstream Stream Leaks on Internal Failure...');
+  
+  let upstreamCancelled = false;
+  const mockUpstreamStream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}\n\n'));
+    },
+    cancel() {
+      upstreamCancelled = true;
+    }
+  });
+
+  try {
+    const converterInstance = new AnthropicToGeminiConverter();
+    const resultStream = converterInstance.convertStream(mockUpstreamStream, 'gemini-2.5-pro');
+    
+    const reader = resultStream.getReader();
+    try {
+      // 读取首个数据块
+      const { done } = await reader.read();
+      // 模拟客户端取消，主动调用 cancel，期望能自动冒泡并安全关闭上游流，防止泄露
+      await reader.cancel();
+      // 等待异步取消回调执行完毕
+      await new Promise(resolve => setTimeout(resolve, 50));
+    } catch (e) {
+      // 忽略可能存在的任何异常
+    } finally {
+      reader.releaseLock();
+    }
+    
+    assert(upstreamCancelled === true, 'upstreamStream.cancel() should have been called on pipeline cancellation/abort');
+  } catch (err: any) {
+    throw new Error(`Test 14 encountered unexpected exception: ${err.message}`);
+  }
+  console.log('✅ Test 14 Passed: Upstream stream cancelled on pipeline cancellation/abort.\n');
+
+  // ==========================================
+  // Test 15: Zero-Buffering on Non-Agentic Streams
+  // ==========================================
+  console.log('Running Test 15: Zero-Buffering on Non-Agentic Streams...');
+  
+  const mockStreamNonAgentic = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}\n\n'));
+      controller.close();
+    }
+  });
+  
+  const converterInstance = new AnthropicToGeminiConverter();
+  const resultStreamNonAgentic = converterInstance.convertStream(mockStreamNonAgentic, 'gemini-2.5-pro', {
+    clientSupportsThinking: false
+  });
+  
+  const readerNonAgentic = resultStreamNonAgentic.getReader();
+  const chunksNonAgentic: string[] = [];
+  const decoder = new TextDecoder();
+  
+  while (true) {
+    const { done, value } = await readerNonAgentic.read();
+    if (done) break;
+    chunksNonAgentic.push(decoder.decode(value));
+  }
+  readerNonAgentic.releaseLock();
+  
+  const joinedNonAgentic = chunksNonAgentic.join('\n');
+  assert(joinedNonAgentic.includes('content_block_delta') && joinedNonAgentic.includes('Hello'), 'Non-agentic stream should immediately emit text delta');
+  
+  const mockStreamAgentic = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"candidates":[{"content":{"parts":[{"text":"I will help you with that."}]}}]}\n\n'));
+      controller.close();
+    }
+  });
+  
+  const resultStreamAgentic = converterInstance.convertStream(mockStreamAgentic, 'gemini-2.5-pro', {
+    clientSupportsThinking: false,
+    tools: [{ name: 'get_weather' }]
+  });
+  
+  const readerAgentic = resultStreamAgentic.getReader();
+  const chunksAgentic: string[] = [];
+  while (true) {
+    const { done, value } = await readerAgentic.read();
+    if (done) break;
+    chunksAgentic.push(decoder.decode(value));
+  }
+  readerAgentic.releaseLock();
+  
+  const joinedAgentic = chunksAgentic.join('\n');
+  assert(joinedAgentic.includes('I will help you with that.'), 'Agentic stream should still output text at the end');
+
+  console.log('✅ Test 15 Passed: Zero-buffering on non-agentic streams verified successfully.\n');
 
   console.log('🎉 ALL REGRESSION TESTS PASSED SUCCESSFULLY! 100% PROTOCOL COMPLIANT! 🎉');
 }

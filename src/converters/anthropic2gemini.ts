@@ -550,10 +550,12 @@ export class AnthropicToGeminiConverter implements IConverter {
 
     // 15 秒定时心跳保护
     let pingInterval: NodeJS.Timeout | null = null;
+    let sseStream: any = null;
+    const readerRef = { current: null as any };
 
     return new ReadableStream<Uint8Array>({
       async start(controller) {
-        const sseStream = parseSSEStream(upstreamStream, requestId);
+        sseStream = parseSSEStream(upstreamStream, requestId, readerRef);
         let messageStartSent = false;
         
         let currentBlockType: 'text' | 'thinking' | null = null;
@@ -575,7 +577,8 @@ export class AnthropicToGeminiConverter implements IConverter {
         let accumulatedGroundingMetadata: any = null;
 
         let textBuffer = '';
-        let isBufferingText = true;
+        const hasTools = !!(options.tools && Array.isArray(options.tools) && options.tools.length > 0);
+        let isBufferingText = hasTools;
         let isInsideThinkingTag = false;
 
         function emitTextDelta(text: string) {
@@ -963,20 +966,53 @@ export class AnthropicToGeminiConverter implements IConverter {
         } finally {
           if (pingInterval) clearInterval(pingInterval);
           try {
+            if (readerRef.current) {
+              await readerRef.current.cancel();
+            }
+          } catch (e) {
+            // 忽略 reader 取消异常
+          }
+          try {
+            if (sseStream && typeof sseStream.return === 'function') {
+              await sseStream.return();
+            }
+          } catch (e) {
+            // 忽略 return 异常
+          }
+          try {
+            await upstreamStream.cancel();
+          } catch (e) {
+            // 忽略取消流异常
+          }
+          try {
             controller.close();
           } catch (e) {
             // 忽略已被关闭的控制器异常
           }
         }
       },
-      cancel(reason) {
+      async cancel(reason) {
         logger.info(`[CONVERTER_STREAM] 客户端断开连接 (原因: ${reason || 'unknown'}). 正在清理资源...`, requestId);
         if (pingInterval) {
           clearInterval(pingInterval);
         }
+        try {
+          if (readerRef.current) {
+            await readerRef.current.cancel();
+          }
+        } catch (e) {
+          // 忽略 reader 取消异常
+        }
+        try {
+          if (sseStream && typeof sseStream.return === 'function') {
+            await sseStream.return();
+          }
+        } catch (e) {
+          // 忽略 return 异常
+        }
         // 尝试取消上游流的读取，彻底释放连接
         try {
-          upstreamStream.cancel().catch(() => {});
+          await upstreamStream.cancel();
         } catch (e) {
           // 忽略取消异常
         }

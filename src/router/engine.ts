@@ -217,7 +217,8 @@ export class RouterEngine {
         return target.converter.convertStream(rawStream, target.targetModel, {
           requestId,
           prefillText: converterOptions.prefillText,
-          clientSupportsThinking
+          clientSupportsThinking,
+          tools: request.tools
         });
       } else {
         const response = await target.adapter.execute(convertedPayload, activeHeaders);
